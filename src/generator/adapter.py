@@ -154,6 +154,65 @@ def pr_date(pr: dict) -> str:
     return pr.get("mergedAt") or pr.get("updatedAt") or pr.get("createdAt") or ""
 
 
+def upstream_pr_diff(pr: dict) -> bytes:
+    """Cache GitHub's full PR patch separately from exported task contents."""
+    number = pr["number"]
+    if type(number) is not int or number < 1:
+        raise ValueError("PR number must be a positive integer")
+    commit = pr["mergeCommit"]["oid"]
+    path = Path(".cache/github/pr-diffs") / f"{number}-{commit}.diff"
+    if path.exists():
+        return path.read_bytes()
+    patch = subprocess.check_output(
+        [
+            "gh",
+            "api",
+            f"repos/nim-lang/Nim/pulls/{number}",
+            "-H",
+            "Accept: application/vnd.github.diff",
+        ]
+    )
+    if not patch.startswith(b"diff --git "):
+        raise ValueError("GitHub did not return a complete PR diff")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        stream.write(patch)
+    temporary.replace(path)
+    return patch
+
+
+def _patch_content(patch: bytes) -> list[bytes]:
+    # Rebase changes blob hashes and line numbers, but every source/context
+    # line (including Nim's significant indentation) must still match.
+    return [
+        line for line in patch.splitlines() if not line.startswith((b"index ", b"@@ "))
+    ]
+
+
+def _merged_base(repo: Path, pr: dict, head: str) -> str:
+    base = git(repo, "rev-parse", head + "^1").decode().strip()
+    count = (pr.get("commits") or {}).get("totalCount", 1)
+    if type(count) is not int or count < 1:
+        raise ValueError("PR commit count must be a positive integer")
+    parents = git(repo, "show", "-s", "--format=%P", head).decode().split()
+    if count == 1 or len(parents) != 1:
+        return base
+    expected = _patch_content(upstream_pr_diff(pr))
+    if expected and _patch_content(git(repo, "diff", base, head)) == expected:
+        return base  # A squash merge can have many original PR commits.
+    try:
+        before_rebase = git(repo, "rev-parse", f"{head}~{count}").decode().strip()
+    except subprocess.CalledProcessError:
+        before_rebase = None
+    if (
+        before_rebase
+        and _patch_content(git(repo, "diff", before_rebase, head)) == expected
+    ):
+        return before_rebase
+    raise ValueError("cannot match merged history to the complete PR diff")
+
+
 def pr_commits(repo: Path, pr: dict) -> tuple[str, str]:
     """Resolve an immutable baseline/reference pair without inventing a merge."""
     merge = (pr.get("mergeCommit") or {}).get("oid")
@@ -181,7 +240,7 @@ def pr_commits(repo: Path, pr: dict) -> tuple[str, str]:
             git(repo, "fetch", "--no-tags", "origin", revision)
     head = pinned[0]
     if merge:
-        base = git(repo, "rev-parse", head + "^1").decode().strip()
+        base = _merged_base(repo, pr, head)
     else:
         bases = git(repo, "merge-base", "--all", *pinned).decode().splitlines()
         if len(bases) != 1:
@@ -555,6 +614,7 @@ def discover(limit: int = 200) -> list[dict]:
       search(query: "repo:nim-lang/Nim is:pr is:merged base:devel sort:updated-desc", type: ISSUE, first: 100, after: $cursor) {
         pageInfo { endCursor hasNextPage }
         nodes { ... on PullRequest { number title body url mergedAt baseRefName mergeCommit { oid }
+          commits { totalCount }
           closingIssuesReferences(first: 100) { pageInfo { hasNextPage } nodes { number title url body } }
           comments(first: 100) { pageInfo { endCursor hasNextPage } nodes { body } }
         } }

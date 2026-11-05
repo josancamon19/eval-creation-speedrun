@@ -426,6 +426,44 @@ def test_batch_supports_mixed_merged_and_open_pr_dates(upstream, tmp_path):
     assert [p.name for p in result["exported"]] == ["nim-pr-43", "nim-pr-42"]
 
 
+def test_rebased_pr_includes_all_commits_verified_against_upstream_diff(
+    upstream, tmp_path, monkeypatch
+):
+    repo, base, pr = upstream
+    (repo / "compiler/main.nim").write_text("final adjustment\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "second rebased commit without tests")
+    head = git(repo, "rev-parse", "HEAD")
+    pr.update(mergeCommit={"oid": head}, commits={"totalCount": 2})
+    expected = adapter.git(repo, "diff", base, head)
+    monkeypatch.setattr(adapter, "upstream_pr_diff", lambda _: expected, raising=False)
+    task = export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate_regression)
+    metadata = tomllib.loads((task / "task.toml").read_text())["metadata"]
+    assert metadata["base_commit"] == base
+    assert metadata["merge_commit"] == head
+    assert "final adjustment" in (task / "solution/implementation.diff").read_text()
+    assert any(c["path"] == "tests/stdlib/tnew.nim" for c in task_spec(task)["cases"])
+
+
+def test_squashed_pr_does_not_rewind_by_original_commit_count(upstream, monkeypatch):
+    repo, base, pr = upstream
+    pr["commits"] = {"totalCount": 12}
+    head = pr["mergeCommit"]["oid"]
+    expected = adapter.git(repo, "diff", base, head)
+    monkeypatch.setattr(adapter, "upstream_pr_diff", lambda _: expected, raising=False)
+    assert adapter.pr_commits(repo, pr) == (base, head)
+
+
+def test_multicommit_pr_rejects_mismatching_full_diff(upstream, monkeypatch):
+    repo, _, pr = upstream
+    pr["commits"] = {"totalCount": 2}
+    monkeypatch.setattr(
+        adapter, "upstream_pr_diff", lambda _: b"different patch", raising=False
+    )
+    with pytest.raises(ValueError, match="complete PR diff"):
+        adapter.pr_commits(repo, pr)
+
+
 def test_default_export_calibrates_before_publishing(upstream, tmp_path, monkeypatch):
     repo, _, pr = upstream
     output = tmp_path / "tasks"
