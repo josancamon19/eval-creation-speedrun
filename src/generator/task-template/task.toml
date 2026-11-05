@@ -26,7 +26,7 @@ artifacts = [
 
 [metadata]
 pr = @PR_NUMBER@
-issue = @ISSUE_NUMBER@
+issues = @ISSUE_NUMBERS@
 name = "@TASK_NAME@"
 category = "compiler"
 tags = ["nim", "regression", "issue-linked"]

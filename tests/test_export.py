@@ -76,6 +76,8 @@ def upstream(tmp_path):
     pr = dict(
         number=42,
         title="Fix issue",
+        body="",
+        comments={"nodes": [], "pageInfo": {"hasNextPage": False}},
         url="https://github.com/nim-lang/Nim/pull/42",
         mergedAt="2026-11-01T00:00:00Z",
         baseRefName="devel",
@@ -102,7 +104,7 @@ def test_export_cleans_issue_and_separates_solution(upstream, tmp_path):
     task = export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate_regression)
     body = b"## Bug\r\n```nim\r\nold()\r\n```"
     assert (task / "instruction.md").read_text() == (
-        "Fix the issue (`/workspace/41.md`) that was reported for `/workspace/Nim`.\n"
+        "Fix the problems reported in `/workspace/41.md` for `/workspace/Nim`.\n"
     )
     assert (task / "environment/41.md").read_bytes() == body
     assert not (task / "environment/{issue_id}.md").exists()
@@ -163,6 +165,90 @@ def test_export_cleans_issue_and_separates_solution(upstream, tmp_path):
         source = archive.extractfile("compiler/main.nim")
         assert source is not None
         assert source.read() == b"old\n"
+
+
+def test_export_includes_every_linked_issue_in_agent_context(upstream, tmp_path):
+    repo, _, pr = upstream
+    pr["closingIssuesReferences"]["nodes"].append(
+        {
+            "number": 43,
+            "title": "Another affected case",
+            "url": "https://github.com/nim-lang/Nim/issues/43",
+            "body": "\n### Description\nThe second reproduction must also work.\n",
+        }
+    )
+    task = export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate_regression)
+    instruction = (task / "instruction.md").read_text()
+    dockerfile = (task / "environment/Dockerfile").read_text()
+    allowed = (task / "environment/.dockerignore").read_text().splitlines()
+    for number in (41, 43):
+        assert f"/workspace/{number}.md" in instruction
+        assert f"COPY {number}.md /workspace/{number}.md" in dockerfile
+        assert f"!{number}.md" in allowed
+    assert (task / "environment/43.md").read_text() == (
+        "The second reproduction must also work."
+    )
+    assert tomllib.loads((task / "task.toml").read_text())["metadata"]["issues"] == [
+        41,
+        43,
+    ]
+    assert not list((task / "tests/fixtures").rglob("*.md"))
+
+
+@pytest.mark.parametrize("invalid", ["empty_second_issue", "truncated"])
+def test_export_requires_complete_linked_issue_reports(upstream, tmp_path, invalid):
+    repo, _, pr = upstream
+    if invalid == "empty_second_issue":
+        pr["closingIssuesReferences"]["nodes"].append(
+            {"number": 43, "body": "### Description\n_No response_\n"}
+        )
+        reason = "issue #43 has no body"
+    else:
+        pr["closingIssuesReferences"]["pageInfo"] = {"hasNextPage": True}
+        reason = "incomplete linked issue"
+    with pytest.raises(ValueError, match=reason):
+        export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate_regression)
+
+
+@pytest.mark.parametrize(
+    "documentation",
+    ["changelog.md", "doc/grammar.txt", "docs/guide.rst", "README.md", "CHANGELOG"],
+)
+def test_documentation_changes_stay_out_of_solution_and_tests(
+    upstream, tmp_path, documentation
+):
+    repo, _, pr = upstream
+    path = repo / documentation
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("Documentation for the new behavior.\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "--amend", "--no-edit", "-q")
+    pr["mergeCommit"]["oid"] = git(repo, "rev-parse", "HEAD")
+
+    task = export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate_regression)
+    patch = (task / "solution/implementation.diff").read_text()
+    assert "compiler/main.nim" in patch
+    assert documentation not in patch
+    assert "Documentation for the new behavior." not in patch
+    assert {case["path"] for case in task_spec(task)["cases"]} == {
+        "tests/stdlib/tnew.nim",
+        "tests/stdlib/told.nim",
+    }
+    for suite in ("pr", "base"):
+        assert not (task / "tests/fixtures" / suite / documentation).exists()
+    with tarfile.open(task / "tests/source.tar.gz") as archive:
+        assert documentation not in archive.getnames()
+
+
+def test_documentation_alone_does_not_count_as_an_implementation(upstream, tmp_path):
+    repo, _, pr = upstream
+    (repo / "compiler/main.nim").write_text("old\n")
+    (repo / "changelog.md").write_text("Documentation only.\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "--amend", "--no-edit", "-q")
+    pr["mergeCommit"]["oid"] = git(repo, "rev-parse", "HEAD")
+    with pytest.raises(ValueError, match="no implementation changes"):
+        export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate_regression)
 
 
 def test_issue_cleanup_preserves_fenced_headings_and_following_sections():
@@ -556,6 +642,37 @@ def test_export_cache_reuses_acceptance_and_both_rejection_stages(upstream, tmp_
     assert offline.batches == []
 
 
+def test_static_rejection_with_null_merge_commit_is_cached_and_reused(
+    upstream, tmp_path
+):
+    repo, _, pr = upstream
+    pr.update(mergeCommit=None, closingIssuesReferences={"nodes": []})
+    cache = tmp_path / "cache"
+    backend = RecordingBackend(unavailable=True)
+    first = adapter.export_tasks(
+        repo, [pr], tmp_path / "first", evaluator=backend, cache_dir=cache
+    )
+    assert first["exported"] == []
+    assert first["calibrated"] == 0
+    assert first["rejected"][0]["stage"] == "static"
+    assert "linked issue" in first["rejected"][0]["reason"]
+    entries = list((cache / "entries").glob("*.json"))
+    assert len(entries) == 1
+    entry = json.loads(entries[0].read_text())
+    assert entry["merge_commit"] is None
+    assert entry["status"] == "rejected"
+
+    second = adapter.export_tasks(
+        repo, [pr], tmp_path / "second", evaluator=backend, cache_dir=cache
+    )
+    assert second["exported"] == []
+    assert second["calibrated"] == 0
+    assert second["cache_hits"] == {"accepted": 0, "rejected": 1}
+    assert second["rejected"][0]["cached"] is True
+    assert second["rejected"][0]["reason"] == first["rejected"][0]["reason"]
+    assert backend.batches == []
+
+
 @pytest.mark.parametrize(
     "change", ["issue", "commit", "template", "policy", "environment"]
 )
@@ -675,37 +792,6 @@ def test_cached_task_never_overwrites_modified_output(upstream, tmp_path):
     assert instruction.read_text() == "local edits"
 
 
-def test_static_rejection_with_null_merge_commit_is_cached_and_reused(
-    upstream, tmp_path
-):
-    repo, _, pr = upstream
-    pr.update(mergeCommit=None, closingIssuesReferences={"nodes": []})
-    cache = tmp_path / "cache"
-    backend = RecordingBackend(unavailable=True)
-    first = adapter.export_tasks(
-        repo, [pr], tmp_path / "first", evaluator=backend, cache_dir=cache
-    )
-    assert first["exported"] == []
-    assert first["calibrated"] == 0
-    assert first["rejected"][0]["stage"] == "static"
-    assert "linked issue" in first["rejected"][0]["reason"]
-    entries = list((cache / "entries").glob("*.json"))
-    assert len(entries) == 1
-    entry = json.loads(entries[0].read_text())
-    assert entry["merge_commit"] is None
-    assert entry["status"] == "rejected"
-
-    second = adapter.export_tasks(
-        repo, [pr], tmp_path / "second", evaluator=backend, cache_dir=cache
-    )
-    assert second["exported"] == []
-    assert second["calibrated"] == 0
-    assert second["cache_hits"] == {"accepted": 0, "rejected": 1}
-    assert second["rejected"][0]["cached"] is True
-    assert second["rejected"][0]["reason"] == first["rejected"][0]["reason"]
-    assert backend.batches == []
-
-
 @pytest.mark.parametrize("corrupt_oracle", [False, True])
 def test_batch_isolates_and_caches_complete_inconclusive_calibration(
     upstream, tmp_path, corrupt_oracle
@@ -767,3 +853,93 @@ def test_batch_isolates_and_caches_complete_inconclusive_calibration(
     assert restored["cache_hits"] == {"accepted": 1, "rejected": 1}
     assert restored["calibrated"] == 0
     assert offline.batches == []
+
+
+@pytest.mark.parametrize(
+    "field,text",
+    [
+        ("title", "fixes #41; generic reflection regression"),
+        ("body", "This resolves: #41."),
+        ("comment", "CLOSED: nim-lang/Nim#41"),
+        ("body", "Fix https://github.com/nim-lang/Nim/issues/41"),
+    ],
+)
+def test_export_resolves_closing_references_outside_github_metadata(
+    upstream, tmp_path, monkeypatch, field, text
+):
+    repo, _, pr = upstream
+    issue = pr["closingIssuesReferences"]["nodes"][0]
+    pr["closingIssuesReferences"] = {"nodes": []}
+    if field == "comment":
+        pr["comments"] = {"nodes": [{"body": text}]}
+    else:
+        pr[field] = text
+    original = subprocess.check_output
+
+    def api(command, **kwargs):
+        if command[0] == "gh":
+            return json.dumps(
+                {"data": {"repository": {"issue_41": {"__typename": "Issue", **issue}}}}
+            ).encode()
+        return original(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "check_output", api)
+    task = export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate_regression)
+    assert "/workspace/41.md" in (task / "instruction.md").read_text()
+    assert (task / "environment/41.md").read_text() == "## Bug\n```nim\nold()\n```"
+    assert pr["closingIssuesReferences"]["nodes"] == []
+
+
+def test_textual_issues_are_combined_with_formal_issues_and_bound_to_cache(
+    upstream, tmp_path, monkeypatch
+):
+    repo, _, pr = upstream
+    pr["title"] = "Fixes #41; resolves #43"
+    pr["comments"] = {"nodes": [{"body": "Closes #43"}]}
+    report = {
+        "number": 43,
+        "title": "Another reproduction",
+        "url": "https://github.com/nim-lang/Nim/issues/43",
+        "body": "### Description\nBoth examples must work.",
+    }
+    original = subprocess.check_output
+
+    def api(command, **kwargs):
+        if command[0] == "gh":
+            return json.dumps(
+                {
+                    "data": {
+                        "repository": {"issue_43": {"__typename": "Issue", **report}}
+                    }
+                }
+            ).encode()
+        return original(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "check_output", api)
+    cache = tmp_path / "cache"
+    backend = RecordingBackend()
+    first = adapter.export_tasks(
+        repo, [pr], tmp_path / "first", evaluator=backend, cache_dir=cache
+    )
+    task = first["exported"][0]
+    instruction = (task / "instruction.md").read_text()
+    assert instruction.count("/workspace/41.md") == 1
+    assert instruction.count("/workspace/43.md") == 1
+    assert (task / "environment/43.md").read_text() == "Both examples must work."
+    cached = adapter.export_tasks(
+        repo,
+        [pr],
+        tmp_path / "restored",
+        evaluator=RecordingBackend(unavailable=True),
+        cache_dir=cache,
+    )
+    assert cached["cache_hits"]["accepted"] == 1
+    report["body"] = "### Description\nA corrected reproduction."
+    changed = adapter.export_tasks(
+        repo, [pr], tmp_path / "changed", evaluator=backend, cache_dir=cache
+    )
+    assert changed["cache_hits"]["accepted"] == 0
+    assert changed["calibrated"] == 1
+    assert (
+        changed["exported"][0] / "environment/43.md"
+    ).read_text() == "A corrected reproduction."

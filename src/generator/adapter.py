@@ -21,6 +21,7 @@ from generator.filters.fail_to_pass import (
 from generator.filters.integration import collect_cases
 from generator.filters.regressions import collect_regression_cases
 from generator.utils.export_cache import ExportCache
+from generator.utils.issue_links import resolve_issue_references
 from generator.utils.task_data import write_cases
 
 TEMPLATE = Path(__file__).parent / "task-template"
@@ -149,13 +150,18 @@ def export_dependencies(repo: Path, base: str, destination: Path) -> None:
 
 
 def inspect_pr(repo: Path, pr: dict) -> dict:
-    issues = pr["closingIssuesReferences"]["nodes"]
-    if len(issues) != 1 or pr["closingIssuesReferences"].get("pageInfo", {}).get(
-        "hasNextPage"
-    ):
-        raise ValueError("pilot requires exactly one linked issue")
-    if not issue_markdown(issues[0].get("body", "")).strip():
-        raise ValueError("linked issue has no body after section cleanup")
+    issues = pr.get("resolvedIssues", pr["closingIssuesReferences"]["nodes"])
+    if not issues:
+        raise ValueError("requires at least one linked issue")
+    if pr["closingIssuesReferences"].get("pageInfo", {}).get("hasNextPage"):
+        raise ValueError("incomplete linked issue list")
+    if len({issue["number"] for issue in issues}) != len(issues):
+        raise ValueError("linked issues must have distinct report numbers")
+    for issue in issues:
+        if not issue_markdown(issue.get("body", "")):
+            raise ValueError(
+                f"linked issue #{issue['number']} has no body after section cleanup"
+            )
     if pr["baseRefName"] != "devel":
         raise ValueError("only the devel branch is supported")
     head = pr["mergeCommit"]["oid"]
@@ -182,7 +188,11 @@ def inspect_pr(repo: Path, pr: dict) -> dict:
         and additions.get(p, "0") not in ("0", "-")
     ]
     implementation = [
-        p for _, p in changed if not p.startswith(("tests/", "testament/"))
+        p
+        for _, p in changed
+        if not p.startswith(("tests/", "testament/", "doc/", "docs/"))
+        and Path(p).suffix.lower() not in {".md", ".rst"}
+        and Path(p).name.lower() not in {"changelog", "changes", "news", "readme"}
     ]
     if not tests:
         raise ValueError("no added executable test cases")
@@ -196,6 +206,7 @@ def inspect_pr(repo: Path, pr: dict) -> dict:
     return dict(
         base=base,
         head=head,
+        issues=issues,
         tests=tests,
         implementation=implementation,
         changed=changed,
@@ -210,6 +221,7 @@ def export_task(
     evaluator: Callable[[Path, str], dict] | None = None,
 ) -> Path:
     """Publish only calibrated blackbox regressions; failed staging is discarded."""
+    pr = resolve_issue_references(pr)
     info = inspect_pr(repo, pr)
     task = output / f"nim-pr-{pr['number']}"
     if task.exists():
@@ -310,6 +322,7 @@ def export_tasks(
                 if pr is None:
                     break
                 result["scanned"] += 1
+                pr = resolve_issue_references(pr)
                 task = output / f"nim-pr-{pr['number']}"
                 key = cache.key(pr) if cache else None
                 entry = cache.load(key) if cache and key else None
@@ -424,25 +437,41 @@ def collect_task_cases(repo: Path, info: dict) -> dict:
 
 def _stage_task(repo: Path, pr: dict, info: dict, selection: dict, task: Path) -> None:
     shutil.copytree(TEMPLATE, task, ignore=shutil.ignore_patterns("__pycache__"))
-    issue = pr["closingIssuesReferences"]["nodes"][0]
-    issue_id = str(issue["number"])
+    issues = info["issues"]
+    issue_files = [f"{issue['number']}.md" for issue in issues]
     instruction = (
         (TEMPLATE / "instruction.md")
         .read_bytes()
-        .replace(b"{issue_id}", issue_id.encode("ascii"))
+        .replace(
+            b"{issue_paths}",
+            ", ".join(f"`/workspace/{name}`" for name in issue_files).encode("ascii"),
+        )
     )
     (task / "instruction.md").write_bytes(instruction)
-    issue_file = task / "environment" / f"{issue_id}.md"
-    issue_file.write_bytes(issue_markdown(issue["body"]).encode("utf-8"))
-    for name in ("Dockerfile", ".dockerignore"):
+    for issue, name in zip(issues, issue_files, strict=True):
+        (task / "environment" / name).write_bytes(
+            issue_markdown(issue["body"]).encode("utf-8")
+        )
+    for name, placeholder, content in (
+        (
+            "Dockerfile",
+            "{issue_copies}",
+            "\n".join(f"COPY {name} /workspace/{name}" for name in issue_files),
+        ),
+        (
+            ".dockerignore",
+            "{issue_allowlist}",
+            "\n".join(f"!{name}" for name in issue_files),
+        ),
+    ):
         path = task / "environment" / name
-        path.write_text(path.read_text().replace("{issue_id}", issue_id))
+        path.write_text(path.read_text().replace(placeholder, content))
     config = task / "task.toml"
     config.write_text(
         config.read_text()
         .replace("@TASK_NAME@", task.name)
         .replace("@PR_NUMBER@", str(pr["number"]))
-        .replace("@ISSUE_NUMBER@", str(issue["number"]))
+        .replace("@ISSUE_NUMBERS@", json.dumps([issue["number"] for issue in issues]))
         .replace("@BASE_COMMIT@", info["base"])
         .replace("@MERGE_COMMIT@", info["head"])
     )
@@ -479,8 +508,9 @@ def discover(limit: int = 200) -> list[dict]:
     query = """query($cursor: String) {
       search(query: "repo:nim-lang/Nim is:pr is:merged base:devel sort:updated-desc", type: ISSUE, first: 100, after: $cursor) {
         pageInfo { endCursor hasNextPage }
-        nodes { ... on PullRequest { number title url mergedAt baseRefName mergeCommit { oid }
-          closingIssuesReferences(first: 10) { pageInfo { hasNextPage } nodes { number title url body } }
+        nodes { ... on PullRequest { number title body url mergedAt baseRefName mergeCommit { oid }
+          closingIssuesReferences(first: 100) { pageInfo { hasNextPage } nodes { number title url body } }
+          comments(first: 100) { pageInfo { endCursor hasNextPage } nodes { body } }
         } }
       }
     }"""

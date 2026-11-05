@@ -50,6 +50,7 @@ class ExportCache:
                     "filters/regressions.py",
                     "utils/__init__.py",
                     "utils/export_cache.py",
+                    "utils/issue_links.py",
                     "utils/task_data.py",
                 )
             },

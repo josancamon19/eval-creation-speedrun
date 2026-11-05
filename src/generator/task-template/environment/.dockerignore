@@ -3,4 +3,4 @@
 !source.tar.gz
 !dependencies.tar.gz
 !build-nim
-!{issue_id}.md
+{issue_allowlist}

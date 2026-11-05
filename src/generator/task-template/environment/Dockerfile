@@ -42,5 +42,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends git \
 ENV PATH="/home/agent/.local/bin:/workspace/Nim/bin:/opt/nim-bootstrap/bin:${PATH}"
 ENV UV_OFFLINE=1
 ENV LITELLM_LOCAL_MODEL_COST_MAP=True
-COPY {issue_id}.md /workspace/{issue_id}.md
+{issue_copies}
 CMD ["sleep", "infinity"]
