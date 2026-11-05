@@ -1,0 +1,524 @@
+import json
+import subprocess
+import tarfile
+import tomllib
+from pathlib import Path
+
+import pytest
+
+from generator import adapter
+from generator.adapter import export_task, select_candidates
+from generator.filters.fail_to_pass import EvaluationError, HarborEvaluator
+
+
+def evaluate_regression(task, agent):
+    cases = json.loads((task / "tests/manifest.json").read_text())["cases"]
+    return {
+        "environment": {"os": "linux", "cpu": "amd64", "backend": "c"},
+        "status": "passed" if agent == "oracle" else "failed",
+        "build": 0,
+        "smoke": {"passed": True},
+        "checks": [
+            {
+                "id": case["id"],
+                "path": case["path"],
+                "status": "passed" if agent == "oracle" else "wrong_exit",
+                "passed": agent == "oracle",
+                "compile_exit_code": 0,
+                "run_exit_code": 0 if agent == "oracle" else 1,
+            }
+            for case in cases
+        ],
+    }
+
+
+def git(repo, *args):
+    return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
+
+
+@pytest.fixture
+def upstream(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    git(repo, "config", "user.name", "Test")
+    git(repo, "config", "user.email", "test@example.invalid")
+    for name, text in {
+        "compiler/main.nim": "old\n",
+        "tests/stdlib/told.nim": "discard\n",
+        "copying.txt": "license\n",
+    }.items():
+        p = repo / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    (repo / "compiler/main.nim").write_text("fixed\n")
+    (repo / "tests/stdlib/tnew.nim").write_text("doAssert true\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "fix")
+    pr = dict(
+        number=42,
+        title="Fix issue",
+        url="https://github.com/nim-lang/Nim/pull/42",
+        mergedAt="2026-11-01T00:00:00Z",
+        baseRefName="devel",
+        mergeCommit={"oid": git(repo, "rev-parse", "HEAD")},
+        closingIssuesReferences={
+            "nodes": [
+                {
+                    "number": 41,
+                    "title": "Bug",
+                    "url": "https://github.com/nim-lang/Nim/issues/41",
+                    "body": (
+                        "### Nim Version\r\n\r\n```\r\nNim 2.4.0\r\n```\r\n\r\n"
+                        "### Description\r\n\r\n## Bug\r\n```nim\r\nold()\r\n```\r\n"
+                    ),
+                }
+            ]
+        },
+    )
+    return repo, base, pr
+
+
+def test_export_cleans_issue_and_separates_solution(upstream, tmp_path):
+    repo, base, pr = upstream
+    task = export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate_regression)
+    body = b"\r\n## Bug\r\n```nim\r\nold()\r\n```\r\n"
+    assert (task / "instruction.md").read_text() == (
+        "A new issue (`/workspace/41.md`) was reported for `/workspace/Nim`. Fix it.\n"
+    )
+    assert (task / "environment/41.md").read_bytes() == body
+    assert not (task / "environment/{issue_id}.md").exists()
+    assert (
+        "COPY 41.md /workspace/41.md" in (task / "environment/Dockerfile").read_text()
+    )
+    assert "!41.md" in (task / "environment/.dockerignore").read_text().splitlines()
+    metadata = tomllib.loads((task / "task.toml").read_text())["metadata"]
+    assert metadata["base_commit"] == base
+    assert not (task / "provenance.json").exists()
+    patch = (task / "solution/implementation.diff").read_text()
+    assert "compiler/main.nim" in patch
+    assert "tests/stdlib/tnew.nim" not in patch
+    assert (task / "tests/fixtures/tests/stdlib/tnew.nim").exists()
+    manifest = json.loads((task / "tests/manifest.json").read_text())
+    assert manifest["environment"] == {"os": "linux", "cpu": "amd64", "backend": "c"}
+    assert metadata["target_os"] == "linux"
+    assert metadata["target_arch"] == "amd64"
+    assert metadata["backend"] == "c"
+    for name in ("source.tar.gz", "dependencies.tar.gz", "build-nim"):
+        assert (task / "tests" / name).read_bytes() == (
+            task / "environment" / name
+        ).read_bytes()
+    config = tomllib.loads((task / "task.toml").read_text())
+    assert "collect" not in config["verifier"]
+    assert {artifact["source"] for artifact in config["artifacts"]} == {
+        "/workspace/Nim/compiler",
+        "/workspace/Nim/lib",
+    }
+    assert (task / "tests/Dockerfile").is_file()
+    assert not (task / "environment/submission.py").exists()
+    assert [case["path"] for case in manifest["cases"]] == ["tests/stdlib/tnew.nim"]
+    evidence = json.loads((task / "tests/calibration.json").read_text())
+    assert evidence["runs"]["nop"]["checks"][0]["passed"] is False
+    assert evidence["runs"]["oracle"]["checks"][0]["passed"] is True
+    assert "tests/manifest.json" in evidence["sha256"]
+    with tarfile.open(task / "environment/source.tar.gz") as archive:
+        assert not any(".git" in Path(n).parts for n in archive.getnames())
+        assert not any(n.endswith("tnew.nim") for n in archive.getnames())
+        source = archive.extractfile("compiler/main.nim")
+        assert source is not None
+        assert source.read() == b"old\n"
+
+
+def test_issue_cleanup_preserves_fenced_headings_and_following_sections():
+    body = (
+        "### Description\nThe reproduction is:\n"
+        "````markdown\n### Nim Version\n```\n### Description\n````\n"
+        "### Nim version ###\nNim 2.4.0\n#### Build details\nDiscard these too.\n"
+        "~~~text\n### Expected Output\nStill version metadata.\n~~~\n"
+        "### Expected Output\nKeep this result.\n"
+    )
+    assert adapter.issue_markdown(body) == (
+        "The reproduction is:\n"
+        "````markdown\n### Nim Version\n```\n### Description\n````\n"
+        "### Expected Output\nKeep this result.\n"
+    )
+
+
+def test_issue_cleanup_without_target_headings_is_unchanged():
+    body = "\r\n## Bug\r\n    ### Nim version\r\nKeep all of this.\r\n"
+    assert adapter.issue_markdown(body) == body
+
+
+def test_issue_cleanup_removes_version_section_at_end():
+    assert (
+        adapter.issue_markdown(
+            "### Description\nKeep the bug.\n### NIM VERSION\nNim 2.4.0\n"
+        )
+        == "Keep the bug.\n"
+    )
+
+
+def test_export_requires_issue_and_added_tests(upstream, tmp_path):
+    repo, _, pr = upstream
+    pr["closingIssuesReferences"]["nodes"] = []
+    with pytest.raises(ValueError, match="one linked issue"):
+        export_task(repo, pr, tmp_path / "tasks")
+
+
+def test_selection_uses_merge_time_and_records_exclusions(upstream):
+    repo, _, pr = upstream
+    newer = dict(pr, number=43, mergedAt="2026-11-02T00:00:00Z")
+    multiple = dict(pr, number=44, closingIssuesReferences={"nodes": [{}, {}]})
+    selected, rejected = select_candidates(repo, [pr, multiple, newer], limit=2)
+    assert [p["number"] for p in selected] == [43, 42]
+    assert rejected[0]["number"] == 44
+
+
+def test_rejects_changes_outside_submitted_source_directories(upstream, tmp_path):
+    repo, _, pr = upstream
+    (repo / "config").mkdir()
+    (repo / "config/nim.cfg").write_text("changed compiler options\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "--amend", "--no-edit", "-q")
+    pr["mergeCommit"]["oid"] = git(repo, "rev-parse", "HEAD")
+    with pytest.raises(ValueError, match="unsupported implementation"):
+        export_task(repo, pr, tmp_path / "tasks")
+
+
+def test_new_merge_is_fetched_from_origin(upstream, tmp_path):
+    repo, _, pr = upstream
+    clone = tmp_path / "stale-clone"
+    subprocess.run(["git", "clone", "-q", str(repo), str(clone)], check=True)
+    (repo / "compiler/main.nim").write_text("a newer fix\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "--amend", "--no-edit", "-q")
+    pr["mergeCommit"]["oid"] = git(repo, "rev-parse", "HEAD")
+    task = export_task(clone, pr, tmp_path / "tasks", evaluator=evaluate_regression)
+    assert (
+        tomllib.loads((task / "task.toml").read_text())["metadata"]["merge_commit"]
+        == pr["mergeCommit"]["oid"]
+    )
+
+
+def test_default_export_calibrates_before_publishing(upstream, tmp_path, monkeypatch):
+    repo, _, pr = upstream
+    output = tmp_path / "tasks"
+    calls = []
+
+    def evaluate(task, agent):
+        assert not (output / "nim-pr-42").exists()
+        calls.append(agent)
+        return evaluate_regression(task, agent)
+
+    monkeypatch.setattr("generator.adapter.HarborEvaluator", lambda: evaluate)
+    task = export_task(repo, pr, output)
+    assert calls == ["nop", "oracle"]
+    assert task.is_dir()
+
+
+@pytest.mark.parametrize("failure", ["already_passes", "infrastructure", "interrupted"])
+def test_failed_calibration_never_exports_a_task(upstream, tmp_path, failure):
+    repo, _, pr = upstream
+    output = tmp_path / "tasks"
+
+    def evaluate(task, agent):
+        if failure == "infrastructure":
+            raise EvaluationError("backend down")
+        if failure == "interrupted":
+            raise KeyboardInterrupt
+        return evaluate_regression(task, "oracle")
+
+    with pytest.raises((ValueError, EvaluationError, KeyboardInterrupt)):
+        export_task(repo, pr, output, evaluator=evaluate)
+    assert not list(output.glob("nim-pr-*"))
+    assert not list(tmp_path.glob(".nim-staging-*"))
+
+
+def test_internal_test_cannot_reach_calibration(upstream, tmp_path):
+    repo, _, pr = upstream
+    (repo / "tests/stdlib/tnew.nim").write_text(
+        "import ../../compiler/ast\ndoAssert true\n"
+    )
+    git(repo, "add", ".")
+    git(repo, "commit", "--amend", "--no-edit", "-q")
+    pr["mergeCommit"]["oid"] = git(repo, "rev-parse", "HEAD")
+
+    def evaluate(task, agent):
+        pytest.fail("implementation-coupled test reached calibration")
+
+    with pytest.raises(ValueError, match="integration"):
+        export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate)
+
+
+def test_passing_baseline_fixture_is_removed_from_export(upstream, tmp_path):
+    repo, _, pr = upstream
+    (repo / "tests/stdlib/tunrelated.nim").write_text("doAssert true\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "--amend", "--no-edit", "-q")
+    pr["mergeCommit"]["oid"] = git(repo, "rev-parse", "HEAD")
+
+    def evaluate(task, agent):
+        observed = evaluate_regression(task, agent)
+        for check in observed["checks"]:
+            if check["path"].endswith("tunrelated.nim"):
+                check.update(status="passed", passed=True, run_exit_code=0)
+        return observed
+
+    task = export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate)
+    manifest = json.loads((task / "tests/manifest.json").read_text())
+    assert [c["path"] for c in manifest["cases"]] == ["tests/stdlib/tnew.nim"]
+    assert not (task / "tests/fixtures/tests/stdlib/tunrelated.nim").exists()
+
+
+def test_batch_export_refills_rejections_without_exceeding_task_limit(
+    upstream, tmp_path
+):
+    assert callable(getattr(adapter, "export_tasks", None))
+    repo, _, pr = upstream
+    prs = [
+        dict(pr, number=n, mergedAt=f"2026-11-0{5 - i}T00:00:00Z")
+        for i, n in enumerate((42, 43, 44, 45))
+    ]
+    output = tmp_path / "tasks"
+    batches = []
+
+    class Backend(HarborEvaluator):
+        def evaluate_many(self, tasks):
+            batches.append([task.name for task in tasks])
+            assert all(not (output / task.name).exists() for task in tasks)
+            return {
+                task.name: {
+                    agent: evaluate_regression(
+                        task, "oracle" if task.name == "nim-pr-43" else agent
+                    )
+                    for agent in ("nop", "oracle")
+                }
+                for task in tasks
+            }
+
+    result = adapter.export_tasks(repo, prs, output, limit=2, evaluator=Backend())
+    assert [path.name for path in result["exported"]] == ["nim-pr-42", "nim-pr-44"]
+    assert [entry["number"] for entry in result["rejected"]] == [43]
+    assert result["scanned"] == 3
+    assert batches == [["nim-pr-42", "nim-pr-43"], ["nim-pr-44"]]
+    assert not (output / "nim-pr-43").exists()
+    assert not (output / "nim-pr-45").exists()
+    assert not list(tmp_path.glob(".nim-staging-*"))
+
+
+def test_sixteen_trial_capacity_batches_eight_pr_pairs(upstream, tmp_path):
+    assert callable(getattr(adapter, "export_tasks", None))
+    repo, _, pr = upstream
+    prs = [dict(pr, number=n) for n in range(42, 52)]
+    batches = []
+
+    class Backend(HarborEvaluator):
+        def evaluate_many(self, tasks):
+            batches.append(len(tasks))
+            return {
+                task.name: {
+                    agent: evaluate_regression(task, agent)
+                    for agent in ("nop", "oracle")
+                }
+                for task in tasks
+            }
+
+    result = adapter.export_tasks(
+        repo, prs, tmp_path / "tasks", limit=10, evaluator=Backend(concurrency=16)
+    )
+    assert len(result["exported"]) == 10
+    assert batches == [8, 2]
+
+
+def test_batch_failure_cleans_staging_and_publishes_nothing(upstream, tmp_path):
+    assert callable(getattr(adapter, "export_tasks", None))
+    repo, _, pr = upstream
+    output = tmp_path / "tasks"
+
+    class Backend(HarborEvaluator):
+        def evaluate_many(self, tasks):
+            raise EvaluationError("backend unavailable")
+
+    with pytest.raises(EvaluationError):
+        adapter.export_tasks(repo, [pr], output, limit=1, evaluator=Backend())
+    assert not list(output.glob("nim-pr-*"))
+    assert not list(tmp_path.glob(".nim-staging-*"))
+
+
+class RecordingBackend(HarborEvaluator):
+    def __init__(self, *, already_passes=(), unavailable=False, **kwargs):
+        super().__init__(**kwargs)
+        self.batches = []
+        self.already_passes = already_passes
+        self.unavailable = unavailable
+
+    def evaluate_many(self, tasks):
+        self.batches.append([task.name for task in tasks])
+        if self.unavailable:
+            raise EvaluationError("backend unavailable")
+        return {
+            task.name: {
+                agent: evaluate_regression(
+                    task, "oracle" if task.name in self.already_passes else agent
+                )
+                for agent in ("nop", "oracle")
+            }
+            for task in tasks
+        }
+
+
+def test_export_cache_reuses_acceptance_and_both_rejection_stages(upstream, tmp_path):
+    repo, _, pr = upstream
+    prs = [
+        pr,
+        dict(pr, number=43),
+        dict(pr, number=44, closingIssuesReferences={"nodes": []}),
+    ]
+    backend = RecordingBackend(already_passes={"nim-pr-43"})
+    cache = tmp_path / "cache"
+    first = adapter.export_tasks(
+        repo, prs, tmp_path / "first", limit=3, evaluator=backend, cache_dir=cache
+    )
+    assert [p.name for p in first["exported"]] == ["nim-pr-42"]
+    assert {r["stage"] for r in first["rejected"]} == {"static", "calibration"}
+    assert first["calibrated"] == 2
+    original = (first["exported"][0] / "instruction.md").read_text()
+    (first["exported"][0] / "instruction.md").write_text("local edits")
+    offline = RecordingBackend(unavailable=True)
+    for _ in range(2):
+        cached = adapter.export_tasks(
+            repo,
+            prs,
+            tmp_path / "restored",
+            limit=3,
+            evaluator=offline,
+            cache_dir=cache,
+        )
+        assert [p.name for p in cached["exported"]] == ["nim-pr-42"]
+        assert (cached["exported"][0] / "instruction.md").read_text() == original
+        assert cached["cache_hits"] == {"accepted": 1, "rejected": 2}
+        assert cached["calibrated"] == 0
+        assert cached["scanned"] == 3
+    assert offline.batches == []
+
+
+@pytest.mark.parametrize(
+    "change", ["issue", "commit", "template", "policy", "environment"]
+)
+def test_export_cache_invalidates_changed_inputs(
+    upstream, tmp_path, monkeypatch, change
+):
+    import shutil
+
+    from generator.filters import fail_to_pass
+
+    repo, _, pr = upstream
+    template = tmp_path / "template"
+    shutil.copytree(adapter.TEMPLATE, template)
+    monkeypatch.setattr(adapter, "TEMPLATE", template)
+    cache = tmp_path / "cache"
+    backend = RecordingBackend()
+    adapter.export_tasks(
+        repo, [pr], tmp_path / "first", evaluator=backend, cache_dir=cache
+    )
+    if change == "issue":
+        pr["closingIssuesReferences"]["nodes"][0]["body"] += "\nNew reproduction.\n"
+    elif change == "commit":
+        (repo / "compiler/main.nim").write_text("different fix\n")
+        git(repo, "add", ".")
+        git(repo, "commit", "--amend", "--no-edit", "-q")
+        pr["mergeCommit"]["oid"] = git(repo, "rev-parse", "HEAD")
+    elif change == "template":
+        with (template / "tests/test.sh").open("a") as stream:
+            stream.write("\n# A changed verifier must be recalibrated.\n")
+    elif change == "policy":
+        monkeypatch.setattr(fail_to_pass, "POLICY", "new-policy")
+    else:
+        backend.environment = "docker"
+    result = adapter.export_tasks(
+        repo, [pr], tmp_path / "second", evaluator=backend, cache_dir=cache
+    )
+    assert result["calibrated"] == 1
+    assert result["cache_hits"] == {"accepted": 0, "rejected": 0}
+    assert backend.batches == [["nim-pr-42"], ["nim-pr-42"]]
+
+
+def test_export_cache_does_not_remember_infrastructure_failure(upstream, tmp_path):
+    repo, _, pr = upstream
+    cache = tmp_path / "cache"
+    output = tmp_path / "tasks"
+    with pytest.raises(EvaluationError):
+        adapter.export_tasks(
+            repo,
+            [pr],
+            output,
+            evaluator=RecordingBackend(unavailable=True),
+            cache_dir=cache,
+        )
+    result = adapter.export_tasks(
+        repo, [pr], output, evaluator=RecordingBackend(), cache_dir=cache
+    )
+    assert result["calibrated"] == 1
+    assert len(result["exported"]) == 1
+
+
+def test_cached_acceptance_with_pending_trials_respects_limit(upstream, tmp_path):
+    repo, _, pr = upstream
+    cache = tmp_path / "cache"
+    adapter.export_tasks(
+        repo, [pr], tmp_path / "first", evaluator=RecordingBackend(), cache_dir=cache
+    )
+    backend = RecordingBackend()
+    prs = [
+        dict(pr, number=43, mergedAt="2026-11-02T00:00:00Z"),
+        pr,
+        dict(pr, number=44, mergedAt="2026-10-31T00:00:00Z"),
+    ]
+    result = adapter.export_tasks(
+        repo, prs, tmp_path / "second", limit=2, evaluator=backend, cache_dir=cache
+    )
+    assert {p.name for p in result["exported"]} == {"nim-pr-42", "nim-pr-43"}
+    assert result["scanned"] == 2
+    assert backend.batches == [["nim-pr-43"]]
+
+
+def test_export_cache_detects_damaged_artifact(upstream, tmp_path):
+    repo, _, pr = upstream
+    cache = tmp_path / "cache"
+    backend = RecordingBackend()
+    adapter.export_tasks(
+        repo, [pr], tmp_path / "first", evaluator=backend, cache_dir=cache
+    )
+    for path in cache.rglob("implementation.diff"):
+        path.write_text("damaged patch")
+    result = adapter.export_tasks(
+        repo, [pr], tmp_path / "second", evaluator=backend, cache_dir=cache
+    )
+    assert result["calibrated"] == 1
+    assert result["cache_hits"]["accepted"] == 0
+    assert (
+        "compiler/main.nim"
+        in (result["exported"][0] / "solution/implementation.diff").read_text()
+    )
+
+
+def test_cached_task_never_overwrites_modified_output(upstream, tmp_path):
+    repo, _, pr = upstream
+    cache, output = tmp_path / "cache", tmp_path / "tasks"
+    adapter.export_tasks(
+        repo, [pr], output, evaluator=RecordingBackend(), cache_dir=cache
+    )
+    instruction = output / "nim-pr-42/instruction.md"
+    instruction.write_text("local edits")
+    with pytest.raises(FileExistsError):
+        adapter.export_tasks(
+            repo,
+            [pr],
+            output,
+            evaluator=RecordingBackend(unavailable=True),
+            cache_dir=cache,
+        )
+    assert instruction.read_text() == "local edits"
