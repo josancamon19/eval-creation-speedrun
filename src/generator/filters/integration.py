@@ -377,6 +377,9 @@ class _Token:
     line: int
 
 
+_LIFETIME_HOOKS = {"=destroy", "=copy", "=sink", "=trace", "=dup", "=wasmoved"}
+
+
 def _tokens(source: str) -> list[_Token]:
     """Lex enough Nim to identify imports, ignoring strings and nested comments."""
     result = []
@@ -447,7 +450,10 @@ def _tokens(source: str) -> list[_Token]:
             if end < 0:
                 raise _Rejected("unterminated quoted identifier")
             value = source[offset + 1 : end]
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*|[^A-Za-z0-9\s]+", value):
+            if (
+                not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*|[^A-Za-z0-9\s]+", value)
+                and _normal(value) not in _LIFETIME_HOOKS
+            ):
                 raise _Rejected("opaque quoted identifier")
             result.append(_Token(value, "identifier", line))
             offset = end + 1

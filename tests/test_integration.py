@@ -49,6 +49,36 @@ def collect(repo, head, paths):
     )
 
 
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "proc `=destroy`(x: var Value) = discard",
+        "proc `=copy`(x: var Value; y: Value) = x.n = y.n",
+        "proc `=sink`(x: var Value; y: Value) = x.n = y.n",
+        "proc `=trace`(x: var Value; env: pointer) = discard",
+        "proc `=dup`(x: Value): Value = Value(n: x.n)",
+        "proc `=wasMoved`(x: var Value) = x.n = 0",
+    ],
+)
+def test_public_lifetime_hooks_are_valid_quoted_identifiers(repository, declaration):
+    path = "tests/public/thook.nim"
+    source = "type Value = object\n  n: int\n" + declaration + "\ndoAssert true\n"
+    repo, head = repository({path: source})
+    result = collect(repo, head, [path])
+    assert result["rejected"] == {}
+    assert len(result["cases"]) == 1
+    assert result["fixtures"] == [path]
+
+
+@pytest.mark.parametrize("name", ["=readFile", "foo import bar", "=arbitraryHook"])
+def test_unrecognized_mixed_quoted_identifiers_stay_rejected(repository, name):
+    path = "tests/public/topaque.nim"
+    repo, head = repository({path: f"proc `{name}`() = discard\n"})
+    result = collect(repo, head, [path])
+    assert result["cases"] == []
+    assert "opaque quoted identifier" in result["rejected"][path]
+
+
 def test_default_run_and_matrix_become_stable_independent_cases(repository):
     repo, head = repository(
         {
