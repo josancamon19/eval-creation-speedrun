@@ -388,6 +388,11 @@ def run_cases(
         result = {
             "id": case.get("id"),
             "path": case.get("path"),
+            **{
+                name: case[name]
+                for name in ("suite", "role", "source_commit")
+                if name in case
+            },
             "status": "infrastructure_error",
             "passed": False,
             "compile_exit_code": None,
@@ -405,7 +410,14 @@ def run_cases(
                 raise ValueError("no host C compiler is installed")
             if case.get("target", "c") != "c":
                 raise ValueError("only the native C target is supported")
-            source = _fixture_path(fixture_root, case.get("path"))
+            case_root = fixture_root
+            if "suite" in case:
+                if case["suite"] not in {"base", "pr"}:
+                    raise ValueError("fixture suite must be base or pr")
+                case_root = fixture_root / case["suite"]
+                if case_root.is_symlink() or not case_root.is_dir():
+                    raise ValueError("fixture suite must be a regular directory")
+            source = _fixture_path(case_root, case.get("path"))
             options = validate_options(case.get("options", []))
             expected = case.get("expected_output")
             if expected is not None and not isinstance(expected, str):

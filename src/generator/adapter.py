@@ -18,6 +18,7 @@ from generator.filters.fail_to_pass import (
     validate_fail_to_pass,
 )
 from generator.filters.integration import collect_cases
+from generator.filters.regressions import collect_regression_cases
 from generator.utils.export_cache import ExportCache
 from generator.utils.task_data import write_cases
 
@@ -212,11 +213,7 @@ def export_task(
     task = output / f"nim-pr-{pr['number']}"
     if task.exists():
         raise FileExistsError(f"{task} already exists; use a new output directory")
-    selection = collect_cases(repo, info["head"], info["tests"])
-    if not selection["cases"]:
-        raise ValueError(
-            f"no supported integration cases: {json.dumps(selection['rejected'], sort_keys=True)}"
-        )
+    selection = collect_task_cases(repo, info)
     output.mkdir(parents=True, exist_ok=True)
     # A staging sibling cannot be discovered as an exported task by Harbor.
     with tempfile.TemporaryDirectory(
@@ -234,13 +231,19 @@ def export_task(
 def _publish_task(
     repo: Path, info: dict, selection: dict, staged: Path, task: Path, evidence: dict
 ) -> None:
-    retained = collect_cases(
-        repo, info["head"], [case["path"] for case in evidence["cases"]]
-    )
-    for path in set(selection["fixtures"]) - set(retained["fixtures"]):
+    retained_fixtures = set()
+    for suite, commit in (("pr", info["head"]), ("base", info["base"])):
+        retained = collect_cases(
+            repo,
+            commit,
+            [case["path"] for case in evidence["cases"] if case["suite"] == suite],
+        )
+        retained_fixtures.update(f"{suite}/{path}" for path in retained["fixtures"])
+    for path in set(selection["fixtures"]) - retained_fixtures:
         (staged / "tests/fixtures" / path).unlink()
     write_cases(staged, evidence["cases"])
     evidence["static_rejections"] = selection["rejected"]
+    evidence["regression_selection"] = selection["regression_selection"]
     save_validation_evidence(staged, evidence)
     if task.exists():
         raise FileExistsError(f"{task} was created during calibration")
@@ -326,11 +329,7 @@ def export_tasks(
                     )
                 try:
                     info = inspect_pr(repo, pr)
-                    selection = collect_cases(repo, info["head"], info["tests"])
-                    if not selection["cases"]:
-                        raise ValueError(
-                            f"no supported integration cases: {json.dumps(selection['rejected'], sort_keys=True)}"
-                        )
+                    selection = collect_task_cases(repo, info)
                 except ValueError as error:
                     if cache and key:
                         cache.reject(key, pr, "static", str(error))
@@ -366,6 +365,48 @@ def export_tasks(
                 result["exported"].append(task)
                 print(task, flush=True)
     return result
+
+
+def collect_task_cases(repo: Path, info: dict) -> dict:
+    """Keep PR expectations and unchanged base assertions in separate suites."""
+    pr = collect_cases(repo, info["head"], sorted(info["tests"]))
+    if not pr["cases"]:
+        raise ValueError(
+            f"no supported integration cases: {json.dumps(pr['rejected'], sort_keys=True)}"
+        )
+    base = collect_regression_cases(repo, info["base"], info["tests"])
+    if not base["cases"]:
+        raise ValueError(
+            "no supported existing-behavior regression cases in affected categories: "
+            + json.dumps(
+                {"selection": base["selection"], "rejected": base["rejected"]},
+                sort_keys=True,
+            )
+        )
+    cases, fixtures, rejected = [], [], {}
+    for suite, commit, selected in (
+        ("pr", info["head"], pr),
+        ("base", info["base"], base),
+    ):
+        cases.extend(
+            {
+                **case,
+                "id": f"{suite}-{case['id']}",
+                "suite": suite,
+                "source_commit": commit,
+            }
+            for case in selected["cases"]
+        )
+        fixtures.extend(f"{suite}/{path}" for path in selected["fixtures"])
+        rejected.update(
+            {f"{suite}/{path}": reason for path, reason in selected["rejected"].items()}
+        )
+    return {
+        "cases": cases,
+        "fixtures": fixtures,
+        "rejected": rejected,
+        "regression_selection": base["selection"],
+    }
 
 
 def _stage_task(repo: Path, pr: dict, info: dict, selection: dict, task: Path) -> None:
@@ -411,9 +452,11 @@ def _stage_task(repo: Path, pr: dict, info: dict, selection: dict, task: Path) -
     fixtures = task / "tests/fixtures"
     # Only inspected programs and their inspected local helper closure are bundled.
     for name in selection["fixtures"]:
+        suite, source = name.split("/", 1)
+        commit = info["base"] if suite == "base" else info["head"]
         dest = fixtures / name
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(git(repo, "show", f"{info['head']}:{name}"))
+        dest.write_bytes(git(repo, "show", f"{commit}:{source}"))
     write_cases(task, selection["cases"])
 
 

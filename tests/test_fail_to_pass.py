@@ -38,7 +38,14 @@ def report(cases, statuses):
 def candidate(tmp_path):
     (tmp_path / "tests").mkdir()
     cases = [
-        {"id": str(i), "path": f"tests/t{i}.nim", "expected_exit": 0} for i in range(4)
+        {
+            "id": str(i),
+            "path": f"tests/t{i}.nim",
+            "expected_exit": 0,
+            "suite": "base" if i == 1 else "pr",
+            "source_commit": "base" if i == 1 else "head",
+        }
+        for i in range(4)
     ]
     (tmp_path / "tests/verify.py").write_text(f"CASES = {cases!r}\n")
     (tmp_path / "tests/case_runner.py").write_text(
@@ -84,16 +91,74 @@ def test_unsupported_task_environment_is_rejected_before_running(candidate):
     assert not calls
 
 
-def test_only_individually_observed_fail_to_pass_cases_survive(candidate):
+def test_retains_new_behavior_and_existing_behavior_with_distinct_roles(candidate):
     task, cases = candidate
     reports = {
         "nop": report(cases, ["wrong_output", "passed", "compile_error", "wrong_exit"]),
         "oracle": report(cases, ["passed", "passed", "passed", "wrong_exit"]),
     }
     result = validate_fail_to_pass(task, lambda path, agent: reports[agent])
-    assert [c["id"] for c in result["cases"]] == ["0", "2"]
-    assert result["rejected"]["1"] == "passes without the implementation"
+    assert [(c["id"], c["role"]) for c in result["cases"]] == [
+        ("0", "fail_to_pass"),
+        ("1", "pass_to_pass"),
+        ("2", "fail_to_pass"),
+    ]
     assert "reference" in result["rejected"]["3"]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "wrong_exit",
+        "wrong_output",
+        "compile_error",
+        "timeout",
+        "runtime_signal",
+        "compiler_signal",
+    ],
+)
+@pytest.mark.parametrize("suite", ["base", "pr"])
+def test_oracle_regression_rejects_entire_task(candidate, status, suite):
+    task, cases = candidate
+    cases[1]["suite"] = suite
+    (task / "tests/verify.py").write_text(f"CASES = {cases!r}\n")
+    reports = {
+        "nop": report(cases, ["wrong_exit", "passed", "wrong_exit", "wrong_exit"]),
+        "oracle": report(cases, ["passed", status, "passed", "passed"]),
+    }
+    with pytest.raises(ValueError, match="regression"):
+        validate_fail_to_pass(task, lambda path, agent: reports[agent])
+
+
+def test_pr_pass_to_pass_does_not_replace_required_base_regression(candidate):
+    task, cases = candidate
+    cases[1]["suite"] = "pr"
+    (task / "tests/verify.py").write_text(f"CASES = {cases!r}\n")
+    reports = {
+        "nop": report(cases, ["wrong_exit", "passed", "wrong_exit", "wrong_exit"]),
+        "oracle": report(cases, ["passed"] * 4),
+    }
+    with pytest.raises(ValueError, match="existing-behavior"):
+        validate_fail_to_pass(task, lambda path, agent: reports[agent])
+
+
+def test_baseline_failing_existing_test_is_audited_without_becoming_new_behavior(
+    candidate,
+):
+    task, cases = candidate
+    cases[2]["suite"] = "base"
+    (task / "tests/verify.py").write_text(f"CASES = {cases!r}\n")
+    reports = {
+        "nop": report(cases, ["wrong_exit", "passed", "compile_error", "passed"]),
+        "oracle": report(cases, ["passed"] * 4),
+    }
+    result = validate_fail_to_pass(task, lambda path, agent: reports[agent])
+    assert [(c["id"], c["role"]) for c in result["cases"]] == [
+        ("0", "fail_to_pass"),
+        ("1", "pass_to_pass"),
+        ("3", "pass_to_pass"),
+    ]
+    assert "baseline compile_error" in result["rejected"]["2"]
 
 
 def test_noop_pass_is_not_a_task(candidate):

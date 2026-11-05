@@ -78,6 +78,49 @@ def test_compiles_and_runs_as_distinct_subprocesses(binary_fixture):
     assert result["path"] == "tests/case.nim"
 
 
+def test_base_and_pr_fixtures_keep_independent_contents(binary_fixture, tmp_path):
+    _, compiler, root = binary_fixture
+    cases = []
+    for suite, output, role in (
+        ("base", "preserved", "pass_to_pass"),
+        ("pr", "corrected", "fail_to_pass"),
+    ):
+        source = root / suite / "tests/case.nim"
+        source.parent.mkdir(parents=True)
+        source.write_text(json.dumps({"program": f"print({output!r})"}))
+        cases.append(
+            {
+                "id": suite,
+                "path": "tests/case.nim",
+                "suite": suite,
+                "role": role,
+                "expected_output": output,
+            }
+        )
+    results = load_runner().run_cases(compiler, root, cases, tmp_path / "logs")
+    assert all(result["passed"] for result in results)
+    assert [(r["suite"], r["role"]) for r in results] == [
+        ("base", "pass_to_pass"),
+        ("pr", "fail_to_pass"),
+    ]
+
+
+@pytest.mark.parametrize("suite", ["../escape", "/tmp", "unknown", ""])
+def test_fixture_suite_cannot_escape(binary_fixture, suite):
+    execute, _, _ = binary_fixture
+    result = execute(case={"suite": suite})
+    assert result["status"] == "infrastructure_error"
+    assert result["compile_exit_code"] is None
+
+
+def test_fixture_suite_symlink_is_rejected(binary_fixture, tmp_path):
+    execute, _, root = binary_fixture
+    (root / "base").symlink_to(root, target_is_directory=True)
+    result = execute(case={"suite": "base"})
+    assert result["status"] == "infrastructure_error"
+    assert result["compile_exit_code"] is None
+
+
 def test_compilation_explicitly_targets_linux_amd64_c(binary_fixture):
     execute, _, _ = binary_fixture
     result = execute()
@@ -524,6 +567,43 @@ def test_empty_manifest_never_earns_reward():
     verifier.score_report(report)
     assert report["status"] == "failed"
     assert report["reward"] == 0
+
+
+@pytest.mark.parametrize(
+    "regression_status",
+    ["compile_error", "wrong_output", "wrong_exit", "runtime_signal", "timeout"],
+)
+def test_new_behavior_cannot_offset_any_regression(regression_status):
+    verifier = load_verifier()
+    report: dict = {
+        "build": 0,
+        "smoke": {"passed": True},
+        "checks": [
+            {"id": "new", "role": "fail_to_pass", "passed": True, "status": "passed"},
+            {
+                "id": "existing",
+                "role": "pass_to_pass",
+                "passed": False,
+                "status": regression_status,
+            },
+        ],
+    }
+    verifier.score_report(report)
+    assert report["reward"] == 0
+    assert report["by_role"]["fail_to_pass"]["passed"] == 1
+    assert report["by_role"]["pass_to_pass"]["failed"] == 1
+
+
+def test_missing_regression_result_cannot_earn_reward():
+    verifier = load_verifier()
+    report = {
+        "build": 0,
+        "smoke": {"passed": True},
+        "checks": [{"id": "new", "passed": True, "status": "passed"}],
+    }
+    verifier.score_report(report, [{"id": "new"}, {"id": "existing"}])
+    assert report["status"] == "infrastructure_error"
+    assert report["reward"] is None
 
 
 @pytest.mark.parametrize(

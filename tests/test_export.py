@@ -23,22 +23,26 @@ def isolated_cache(tmp_path, monkeypatch):
 
 def evaluate_regression(task, agent):
     cases = task_spec(task)["cases"]
+    checks = []
+    for case in cases:
+        passed = agent == "oracle" or case.get("suite") == "base"
+        checks.append(
+            {
+                "id": case["id"],
+                "path": case["path"],
+                "suite": case.get("suite"),
+                "status": "passed" if passed else "wrong_exit",
+                "passed": passed,
+                "compile_exit_code": 0,
+                "run_exit_code": 0 if passed else 1,
+            }
+        )
     return {
         "environment": {"os": "linux", "cpu": "amd64", "backend": "c"},
         "status": "passed" if agent == "oracle" else "failed",
         "build": 0,
         "smoke": {"passed": True},
-        "checks": [
-            {
-                "id": case["id"],
-                "path": case["path"],
-                "status": "passed" if agent == "oracle" else "wrong_exit",
-                "passed": agent == "oracle",
-                "compile_exit_code": 0,
-                "run_exit_code": 0 if agent == "oracle" else 1,
-            }
-            for case in cases
-        ],
+        "checks": checks,
     }
 
 
@@ -55,7 +59,8 @@ def upstream(tmp_path):
     git(repo, "config", "user.email", "test@example.invalid")
     for name, text in {
         "compiler/main.nim": "old\n",
-        "tests/stdlib/told.nim": "discard\n",
+        "tests/stdlib/told.nim": "import ./support/helper\ndoAssert stable == 1\n",
+        "tests/stdlib/support/helper.nim": "const stable* = 1\n",
         "copying.txt": "license\n",
     }.items():
         p = repo / name
@@ -111,7 +116,7 @@ def test_export_cleans_issue_and_separates_solution(upstream, tmp_path):
     patch = (task / "solution/implementation.diff").read_text()
     assert "compiler/main.nim" in patch
     assert "tests/stdlib/tnew.nim" not in patch
-    assert (task / "tests/fixtures/tests/stdlib/tnew.nim").exists()
+    assert (task / "tests/fixtures/pr/tests/stdlib/tnew.nim").exists()
     manifest = task_spec(task)
     assert manifest["environment"] == {"os": "linux", "cpu": "amd64", "backend": "c"}
     assert metadata["target_os"] == "linux"
@@ -129,7 +134,12 @@ def test_export_cleans_issue_and_separates_solution(upstream, tmp_path):
     }
     assert (task / "tests/Dockerfile").is_file()
     assert not (task / "environment/submission.py").exists()
-    assert [case["path"] for case in manifest["cases"]] == ["tests/stdlib/tnew.nim"]
+    assert [
+        (case["path"], case["suite"], case["role"]) for case in manifest["cases"]
+    ] == [
+        ("tests/stdlib/tnew.nim", "pr", "fail_to_pass"),
+        ("tests/stdlib/told.nim", "base", "pass_to_pass"),
+    ]
     for name in ("calibration.json", "manifest.json", "platform.json"):
         assert not (task / "tests" / name).exists()
         assert name not in (task / "tests/Dockerfile").read_text()
@@ -137,6 +147,16 @@ def test_export_cleans_issue_and_separates_solution(upstream, tmp_path):
     assert evidence["runs"]["nop"]["checks"][0]["passed"] is False
     assert evidence["runs"]["oracle"]["checks"][0]["passed"] is True
     assert "tests/verify.py" in evidence["sha256"]
+    assert evidence["regression_selection"]["categories"] == ["tests/stdlib"]
+    assert evidence["regression_selection"]["candidate_paths"] == [
+        "tests/stdlib/told.nim"
+    ]
+    assert evidence["counts"] == {
+        "fail_to_pass": 1,
+        "pass_to_pass": 1,
+        "base_pass_to_pass": 1,
+        "rejected": 0,
+    }
     with tarfile.open(task / "environment/source.tar.gz") as archive:
         assert not any(".git" in Path(n).parts for n in archive.getnames())
         assert not any(n.endswith("tnew.nim") for n in archive.getnames())
@@ -281,7 +301,9 @@ def test_internal_test_cannot_reach_calibration(upstream, tmp_path):
         export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate)
 
 
-def test_passing_baseline_fixture_is_removed_from_export(upstream, tmp_path):
+def test_passing_pr_fixture_remains_scored_alongside_base_regressions(
+    upstream, tmp_path
+):
     repo, _, pr = upstream
     (repo / "tests/stdlib/tunrelated.nim").write_text("doAssert true\n")
     git(repo, "add", ".")
@@ -297,8 +319,105 @@ def test_passing_baseline_fixture_is_removed_from_export(upstream, tmp_path):
 
     task = export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate)
     manifest = task_spec(task)
-    assert [c["path"] for c in manifest["cases"]] == ["tests/stdlib/tnew.nim"]
-    assert not (task / "tests/fixtures/tests/stdlib/tunrelated.nim").exists()
+    assert [(c["path"], c["role"]) for c in manifest["cases"]] == [
+        ("tests/stdlib/tnew.nim", "fail_to_pass"),
+        ("tests/stdlib/tunrelated.nim", "pass_to_pass"),
+        ("tests/stdlib/told.nim", "pass_to_pass"),
+    ]
+    assert (task / "tests/fixtures/pr/tests/stdlib/tunrelated.nim").exists()
+
+
+def test_original_test_and_helper_bytes_survive_same_path_pr_changes(
+    upstream, tmp_path
+):
+    repo, base, pr = upstream
+    original = (repo / "tests/stdlib/told.nim").read_bytes()
+    helper = (repo / "tests/stdlib/support/helper.nim").read_bytes()
+    changed = b"import ./support/helper\ndoAssert stable == 2\n"
+    (repo / "tests/stdlib/told.nim").write_bytes(changed)
+    (repo / "tests/stdlib/support/helper.nim").write_text("const stable* = 2\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "--amend", "--no-edit", "-q")
+    pr["mergeCommit"]["oid"] = git(repo, "rev-parse", "HEAD")
+    task = export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate_regression)
+    fixture_root = task / "tests/fixtures"
+    assert (fixture_root / "base/tests/stdlib/told.nim").read_bytes() == original
+    assert (
+        fixture_root / "base/tests/stdlib/support/helper.nim"
+    ).read_bytes() == helper
+    assert (fixture_root / "pr/tests/stdlib/told.nim").read_bytes() == changed
+    assert (
+        fixture_root / "pr/tests/stdlib/support/helper.nim"
+    ).read_bytes() == b"const stable* = 2\n"
+    versions = [
+        case
+        for case in task_spec(task)["cases"]
+        if case["path"] == "tests/stdlib/told.nim"
+    ]
+    assert [(c["suite"], c["role"], c["source_commit"]) for c in versions] == [
+        ("pr", "fail_to_pass", pr["mergeCommit"]["oid"]),
+        ("base", "pass_to_pass", base),
+    ]
+    assert versions[0]["id"] != versions[1]["id"]
+
+
+def test_export_rejects_reference_that_breaks_any_existing_assertion(
+    upstream, tmp_path
+):
+    repo, _, pr = upstream
+    output = tmp_path / "tasks"
+
+    def evaluate(task, agent):
+        observed = evaluate_regression(task, agent)
+        if agent == "oracle":
+            for check in observed["checks"]:
+                if check["suite"] == "base":
+                    check.update(status="wrong_exit", passed=False, run_exit_code=1)
+            observed["status"] = "failed"
+        return observed
+
+    with pytest.raises(ValueError, match="existing-behavior regressions"):
+        export_task(repo, pr, output, evaluator=evaluate)
+    assert not list(output.glob("nim-pr-*"))
+
+
+def test_preexisting_failure_prunes_only_its_base_fixture_closure(upstream, tmp_path):
+    repo, base, pr = upstream
+    git(repo, "checkout", "-q", base)
+    (repo / "tests/stdlib/tbroken.nim").write_text(
+        "import ./support/brokenhelper\ndoAssert broken == 1\n"
+    )
+    (repo / "tests/stdlib/support/brokenhelper.nim").write_text("const broken* = 0\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "preexisting failing test")
+    (repo / "compiler/main.nim").write_text("fixed\n")
+    (repo / "tests/stdlib/tbroken.nim").write_text(
+        "import ./support/brokenhelper\ndoAssert broken == 2\n"
+    )
+    (repo / "tests/stdlib/support/brokenhelper.nim").write_text("const broken* = 2\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "fix")
+    pr["mergeCommit"]["oid"] = git(repo, "rev-parse", "HEAD")
+
+    def evaluate(task, agent):
+        observed = evaluate_regression(task, agent)
+        for check in observed["checks"]:
+            if check["suite"] == "base" and check["path"].endswith("tbroken.nim"):
+                check.update(status="wrong_exit", passed=False, run_exit_code=1)
+        observed["status"] = "failed"
+        return observed
+
+    task = export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate)
+    fixture_root = task / "tests/fixtures"
+    assert not (fixture_root / "base/tests/stdlib/tbroken.nim").exists()
+    assert not (fixture_root / "base/tests/stdlib/support/brokenhelper.nim").exists()
+    assert (fixture_root / "pr/tests/stdlib/tbroken.nim").exists()
+    assert (fixture_root / "pr/tests/stdlib/support/brokenhelper.nim").exists()
+    assert (fixture_root / "base/tests/stdlib/support/helper.nim").exists()
+    audit = json.loads(validation_evidence_path(task).read_text())
+    assert audit["counts"]["base_pass_to_pass"] == 1
+    assert len(audit["rejected"]) == 1
+    assert "baseline wrong_exit" in next(iter(audit["rejected"].values()))
 
 
 def test_batch_export_refills_rejections_without_exceeding_task_limit(

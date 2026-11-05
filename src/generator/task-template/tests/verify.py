@@ -72,7 +72,32 @@ def protect_tree(root):
         path.chmod(0o555 if path.is_dir() or executable else 0o444)
 
 
-def score_report(report):
+def score_report(report, cases=None):
+    """Require every new-behavior and preservation check; never average failures."""
+    checks = report.get("checks", [])
+    report["by_role"] = {}
+    for check in checks:
+        group = report["by_role"].setdefault(
+            check.get("role", "uncalibrated"), {"total": 0, "passed": 0, "failed": 0}
+        )
+        group["total"] += 1
+        group["passed" if check.get("passed") is True else "failed"] += 1
+    if (
+        cases is not None
+        and report.get("build") == 0
+        and report.get("smoke", {}).get("passed") is True
+    ):
+        expected = [case.get("id") for case in cases]
+        observed = [check.get("id") for check in checks]
+        if (
+            len(set(expected)) != len(expected)
+            or len(set(observed)) != len(observed)
+            or set(expected) != set(observed)
+        ):
+            report.update(
+                status="infrastructure_error",
+                error="missing, duplicate, or unexpected case results",
+            )
     observations = [report.get("smoke", {}), *report.get("checks", [])]
     if report.get("status") == "infrastructure_error" or any(
         result.get("status") == "infrastructure_error" for result in observations
@@ -222,7 +247,7 @@ def main():
                     command_prefix=prefix,
                     work_dir=output,
                 )
-        score_report(report)
+        score_report(report, cases)
     except InvalidSubmission as error:
         report.update(status="failed", submission=False, reward=0, error=str(error))
     except Exception as error:

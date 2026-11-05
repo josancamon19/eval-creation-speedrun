@@ -47,6 +47,7 @@ class ExportCache:
                     "filters/__init__.py",
                     "filters/integration.py",
                     "filters/fail_to_pass.py",
+                    "filters/regressions.py",
                     "utils/__init__.py",
                     "utils/export_cache.py",
                     "utils/task_data.py",

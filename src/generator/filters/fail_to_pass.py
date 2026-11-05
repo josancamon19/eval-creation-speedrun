@@ -1,4 +1,4 @@
-"""Retain tests that fail without the PR implementation and pass with it."""
+"""Calibrate new behavior and mandatory existing-behavior regression coverage."""
 
 import hashlib
 import json
@@ -14,7 +14,7 @@ from generator.utils.task_data import task_spec
 
 FAILURES = {"compile_error", "wrong_exit", "wrong_output"}
 INCONCLUSIVE = {"timeout", "runtime_signal", "compiler_signal"}
-POLICY = "nim-blackbox-fail-to-pass-linux-amd64-c-v2"
+POLICY = "nim-blackbox-fail-to-pass-and-regressions-linux-amd64-c-v3"
 
 
 class EvaluationError(RuntimeError):
@@ -72,13 +72,17 @@ def _checks(report: dict, cases: list[dict], agent: str) -> dict[str, dict]:
 
 
 def validate_fail_to_pass(task: Path, evaluate: Callable[[Path, str], dict]) -> dict:
-    """Run both states with identical fixtures; retain only proven configurations."""
+    """Require a real fix and preserve every observed baseline-passing assertion."""
     manifest = task_spec(task)
     if manifest.get("environment") != ENVIRONMENT:
         raise ValueError("task environment must be Linux amd64 with the C backend")
     cases = manifest["cases"]
     if not cases or len({case["id"] for case in cases}) != len(cases):
         raise ValueError("candidate must contain unique integration test cases")
+    if any(case.get("suite") not in {"pr", "base"} for case in cases):
+        raise ValueError(
+            "candidate must distinguish PR tests from base regression tests"
+        )
     reports = (
         evaluate.evaluate_many([task])[task.name]
         if isinstance(evaluate, HarborEvaluator)
@@ -87,12 +91,23 @@ def validate_fail_to_pass(task: Path, evaluate: Callable[[Path, str], dict]) -> 
     indexed = {}
     for agent in ("nop", "oracle"):
         indexed[agent] = _checks(reports[agent], cases, agent)
-    kept, rejected = [], {}
+    kept, rejected, regressions = [], {}, {}
     for case in cases:
         key = case["id"]
         before, after = indexed["nop"][key], indexed["oracle"][key]
         if before["status"] == "passed":
-            rejected[key] = "passes without the implementation"
+            if after["status"] != "passed":
+                regressions[key] = (
+                    f"{case['suite']}:{case['path']} passed on the baseline but "
+                    f"reference implementation returned {after['status']}"
+                )
+            else:
+                kept.append({**case, "role": "pass_to_pass"})
+        elif case["suite"] == "base":
+            rejected[key] = (
+                f"existing-behavior test excluded: baseline {before['status']} "
+                "does not establish passing behavior"
+            )
         elif before["status"] not in FAILURES:
             rejected[key] = f"baseline {before['status']} is not regression evidence"
         elif after["status"] != "passed":
@@ -100,15 +115,31 @@ def validate_fail_to_pass(task: Path, evaluate: Callable[[Path, str], dict]) -> 
                 f"reference implementation does not pass ({after['status']})"
             )
         else:
-            kept.append(case)
-    if not kept:
+            kept.append({**case, "role": "fail_to_pass"})
+    if regressions:
+        raise ValueError(
+            "reference implementation causes existing-behavior regressions: "
+            + json.dumps(regressions, sort_keys=True)
+        )
+    if not any(case["role"] == "fail_to_pass" for case in kept):
         raise ValueError(
             f"no fail-to-pass integration cases: {json.dumps(rejected, sort_keys=True)}"
+        )
+    if not any(case["suite"] == "base" for case in kept):
+        raise ValueError(
+            "no baseline-passing existing-behavior regression cases: "
+            + json.dumps(rejected, sort_keys=True)
         )
     return {
         "policy": POLICY,
         "environment": dict(ENVIRONMENT),
         "cases": kept,
+        "counts": {
+            "fail_to_pass": sum(case["role"] == "fail_to_pass" for case in kept),
+            "pass_to_pass": sum(case["role"] == "pass_to_pass" for case in kept),
+            "base_pass_to_pass": sum(case["suite"] == "base" for case in kept),
+            "rejected": len(rejected),
+        },
         "rejected": rejected,
         "runs": reports,
     }
@@ -188,7 +219,7 @@ class HarborEvaluator:
             "environment": {
                 "type": self.environment,
                 "delete": True,
-                "kwargs": {"auto_snapshot": True}
+                "kwargs": {"auto_snapshot": False}
                 if self.environment == "daytona"
                 else {},
             },
