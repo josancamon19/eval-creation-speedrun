@@ -614,7 +614,7 @@ def discover(limit: int = 200) -> list[dict]:
       search(query: "repo:nim-lang/Nim is:pr is:merged base:devel sort:updated-desc", type: ISSUE, first: 100, after: $cursor) {
         pageInfo { endCursor hasNextPage }
         nodes { ... on PullRequest { number title body url mergedAt baseRefName mergeCommit { oid }
-          commits { totalCount }
+          commits(first: 100) { totalCount pageInfo { endCursor hasNextPage } nodes { commit { oid message } } }
           closingIssuesReferences(first: 100) { pageInfo { hasNextPage } nodes { number title url body } }
           comments(first: 100) { pageInfo { endCursor hasNextPage } nodes { body } }
         } }

@@ -123,6 +123,76 @@ def test_resolver_unions_metadata_and_text_and_rejects_pr_references(monkeypatch
     assert pr == original
 
 
+def test_explicit_closing_references_in_pr_commits_are_included(monkeypatch):
+    pr = {
+        "number": 99,
+        "body": "",
+        "comments": {"nodes": []},
+        "closingIssuesReferences": {"nodes": [issue(41)]},
+        "commits": {
+            "totalCount": 1,
+            "pageInfo": {"hasNextPage": False},
+            "nodes": [
+                {
+                    "commit": {
+                        "oid": "a" * 40,
+                        "message": "Fixes #42; closes #44\n```\nFixes #43\n```",
+                    }
+                }
+            ],
+        },
+    }
+    original = copy.deepcopy(pr)
+    monkeypatch.setattr(
+        issue_links,
+        "_graphql",
+        lambda *args, **kwargs: {
+            "issue_42": {"__typename": "Issue", **issue(42)},
+            "issue_44": {"__typename": "PullRequest"},
+        },
+    )
+    resolved = issue_links.resolve_issue_references(pr)
+    assert [i["number"] for i in resolved["resolvedIssues"]] == [41, 42]
+    assert resolved["commits"] == original["commits"]
+    assert pr == original
+
+
+def test_commit_pagination_finds_later_closing_references(monkeypatch):
+    pr = {
+        "number": 99,
+        "body": "",
+        "comments": {"nodes": []},
+        "closingIssuesReferences": {"nodes": [issue(41)]},
+        "commits": {
+            "totalCount": 2,
+            "pageInfo": {"hasNextPage": True, "endCursor": "first"},
+            "nodes": [{"commit": {"oid": "a" * 40, "message": "Refactor"}}],
+        },
+    }
+
+    def api(query, **variables):
+        if variables:
+            assert variables == {"number": 99, "cursor": "first"}
+            return {
+                "pullRequest": {
+                    "commits": {
+                        "pageInfo": {"hasNextPage": False},
+                        "nodes": [
+                            {"commit": {"oid": "b" * 40, "message": "Fixes #42"}}
+                        ],
+                    }
+                }
+            }
+        return {"issue_42": {"__typename": "Issue", **issue(42)}}
+
+    monkeypatch.setattr(issue_links, "_graphql", api)
+    resolved = issue_links.resolve_issue_references(pr)
+    assert [i["number"] for i in resolved["resolvedIssues"]] == [41, 42]
+    assert len(resolved["commits"]["nodes"]) == 2
+    assert resolved["commits"]["totalCount"] == 2
+    assert not resolved["commits"]["pageInfo"]["hasNextPage"]
+
+
 def test_comment_pagination_keeps_issue_references_from_later_pages(monkeypatch):
     pr = {
         "number": 99,

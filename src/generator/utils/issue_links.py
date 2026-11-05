@@ -96,8 +96,39 @@ def complete_comments(pr: dict) -> dict:
     return {"nodes": comments, "pageInfo": {"hasNextPage": False}}
 
 
+def complete_commits(pr: dict) -> dict:
+    """Preserve commit provenance and complete any discovered message pages."""
+    connection = pr.get("commits", {})
+    commits = list(connection.get("nodes", []))
+    page = connection.get("pageInfo", {})
+    cursors = set()
+    while page.get("hasNextPage"):
+        cursor = page.get("endCursor")
+        if not cursor or cursor in cursors:
+            raise RuntimeError("Incomplete or repeated GitHub commit cursor")
+        cursors.add(cursor)
+        data = _graphql(
+            """query($number: Int!, $cursor: String!) {
+              repository(owner: "nim-lang", name: "Nim") {
+                pullRequest(number: $number) {
+                  commits(first: 100, after: $cursor) {
+                    pageInfo { endCursor hasNextPage }
+                    nodes { commit { oid message } }
+                  }
+                }
+              }
+            }""",
+            number=pr["number"],
+            cursor=cursor,
+        )
+        next_page = data["pullRequest"]["commits"]
+        commits.extend(next_page["nodes"])
+        page = next_page["pageInfo"]
+    return {**connection, "nodes": commits, "pageInfo": {"hasNextPage": False}}
+
+
 def resolve_issue_references(pr: dict) -> dict:
-    """Union formal links and verified title/body/comment references in a copy.
+    """Union formal links and verified prose/commit references in a copy.
 
     Raw closingIssuesReferences is left intact. Resolved issue bodies become
     export/cache inputs, so a changed report cannot reuse old calibration.
@@ -121,11 +152,13 @@ def resolve_issue_references(pr: dict) -> dict:
             raise RuntimeError(f"Missing Nim PR #{pr['number']}")
         pr = {**pr, **{key: data[key] for key in ("body", "comments") if key not in pr}}
     comments = complete_comments(pr)
+    commits = complete_commits(pr)
     numbers = set()
     for text in (
         pr.get("title", ""),
         pr.get("body", ""),
         *(c.get("body", "") for c in comments["nodes"]),
+        *(c["commit"].get("message", "") for c in commits["nodes"]),
     ):
         numbers.update(closing_references(text or ""))
     issues = list(pr.get("closingIssuesReferences", {}).get("nodes", []))
@@ -153,5 +186,6 @@ def resolve_issue_references(pr: dict) -> dict:
         **pr,
         "closingIssuesReferences": pr.get("closingIssuesReferences", {"nodes": []}),
         "comments": comments,
+        **({"commits": commits} if "commits" in pr else {}),
         "resolvedIssues": issues,
     }
