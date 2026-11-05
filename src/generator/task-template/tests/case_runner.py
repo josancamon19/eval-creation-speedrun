@@ -154,6 +154,7 @@ def require_environment():
 
 # Keep this policy in sync with generator.filters.integration's trusted case parser.
 _EXPERIMENTAL = {
+    "alias",
     "dotoperators",
     "calloperator",
     "parallel",

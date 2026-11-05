@@ -141,9 +141,10 @@ def test_dynamic_or_unsupported_config_switches_remain_rejected(repository, conf
         "proc `=trace`(x: var Value; env: pointer) = discard",
         "proc `=dup`(x: Value): Value = Value(n: x.n)",
         "proc `=wasMoved`(x: var Value) = x.n = 0",
+        "proc `property=`(x: var Value; n: int) = x.n = n",
     ],
 )
-def test_public_lifetime_hooks_are_valid_quoted_identifiers(repository, declaration):
+def test_public_special_routines_are_valid_quoted_identifiers(repository, declaration):
     path = "tests/public/thook.nim"
     source = "type Value = object\n  n: int\n" + declaration + "\ndoAssert true\n"
     repo, head = repository({path: source})
@@ -153,7 +154,9 @@ def test_public_lifetime_hooks_are_valid_quoted_identifiers(repository, declarat
     assert result["fixtures"] == [path]
 
 
-@pytest.mark.parametrize("name", ["=readFile", "foo import bar", "=arbitraryHook"])
+@pytest.mark.parametrize(
+    "name", ["=readFile", "foo import bar", "=arbitraryHook", "foo=bar", "foo ="]
+)
 def test_unrecognized_mixed_quoted_identifiers_stay_rejected(repository, name):
     path = "tests/public/topaque.nim"
     repo, head = repository({path: f"proc `{name}`() = discard\n"})
@@ -355,11 +358,17 @@ def test_command_cannot_silently_change_ignored_matrix_options(repository):
 
 
 @pytest.mark.parametrize(
-    "feature", ["views", "codeReordering", "genericsOpenSym", "templateOpenSym"]
+    "feature",
+    ["views", "codeReordering", "genericsOpenSym", "templateOpenSym", "alias"],
 )
-def test_known_literal_experimental_pragma_preserves_source_scope(repository, feature):
+@pytest.mark.parametrize("prefix", ["", "push "])
+def test_known_literal_experimental_pragma_preserves_source_scope(
+    repository, feature, prefix
+):
     path = "tests/tfeature.nim"
-    source = f'{{.experimental: "{feature}".}}\ndoAssert true\n'
+    source = f'{{.{prefix}experimental: "{feature}".}}\ndoAssert true\n'
+    if prefix:
+        source += "{.pop.}\n"
     repo, head = repository({path: source})
     result = collect(repo, head, [path])
     assert result["rejected"] == {}
@@ -376,7 +385,8 @@ def test_known_literal_experimental_pragma_preserves_source_scope(repository, fe
         '{.experimental: "unknownFeature".}',
         "{.experimental: chosenFeature.}",
         '{.experimental: "views", experimental: "compiletimeFFI".}',
-        '{.push experimental: "views".}',
+        '{.push experimental: "unknownFeature".}',
+        '{.push experimental: "views", checks: off.}',
         '{.experimental: "views".}\n{.checks: off.}',
     ],
 )

@@ -91,6 +91,7 @@ _OTHER_PLATFORMS = {
     "bigendian",
 }
 _EXPERIMENTAL = {
+    "alias",
     "dotoperators",
     "calloperator",
     "parallel",
@@ -469,7 +470,7 @@ def _tokens(source: str) -> list[_Token]:
                 raise _Rejected("unterminated quoted identifier")
             value = source[offset + 1 : end]
             if (
-                not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*|[^A-Za-z0-9\s]+", value)
+                not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=?|[^A-Za-z0-9\s]+", value)
                 and _normal(value) not in _LIFETIME_HOOKS
             ):
                 raise _Rejected("opaque quoted identifier")
@@ -581,7 +582,15 @@ def _literal_experimental_pragma(tokens: list[_Token], index: int) -> bool:
     """Accept a standalone, known feature without moving its source-level scope."""
     if index < 2 or index + 4 >= len(tokens):
         return False
-    before, after = tokens[index - 2 : index], tokens[index + 1 : index + 5]
+    start = index - 2
+    if (
+        tokens[index - 1].kind == "identifier"
+        and _normal(tokens[index - 1].value) == "push"
+    ):
+        start -= 1
+        if start < 0:
+            return False
+    before, after = tokens[start : start + 2], tokens[index + 1 : index + 5]
     return (
         [(t.kind, t.value) for t in before]
         == [("punctuation", "{"), ("punctuation", ".")]
