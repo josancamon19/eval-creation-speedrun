@@ -222,11 +222,13 @@ def pr_commits(repo: Path, pr: dict) -> tuple[str, str]:
         revisions = [merge]
     else:
         if (
-            pr.get("state") != "OPEN"
+            pr.get("state") not in {"OPEN", "CLOSED"}
             or pr.get("isDraft") is not False
             or pr.get("mergedAt")
         ):
-            raise ValueError("requires a merged PR or an explicitly non-draft open PR")
+            raise ValueError(
+                "requires a merged PR or an explicitly non-draft unmerged PR"
+            )
         revisions = [pr.get("headRefOid"), pr.get("baseRefOid")]
     pinned: list[str] = []
     for revision in revisions:
@@ -246,7 +248,7 @@ def pr_commits(repo: Path, pr: dict) -> tuple[str, str]:
     else:
         bases = git(repo, "merge-base", "--all", *pinned).decode().splitlines()
         if len(bases) != 1:
-            raise ValueError("open PR must have one unambiguous common ancestor")
+            raise ValueError("unmerged PR must have one unambiguous common ancestor")
         base = bases[0]
     return base, head
 
@@ -578,7 +580,7 @@ def _stage_task(repo: Path, pr: dict, info: dict, selection: dict, task: Path) -
             config.read_text().replace(
                 f'merge_commit = "{info["head"]}"',
                 f'reference_commit = "{info["head"]}"\n'
-                'source_status = "open"\n'
+                f'source_status = "{pr["state"].lower()}"\n'
                 f'base_ref_commit = "{pr["baseRefOid"]}"',
             )
         )
