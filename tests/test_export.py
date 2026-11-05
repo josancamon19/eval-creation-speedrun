@@ -104,7 +104,7 @@ def test_export_cleans_issue_and_separates_solution(upstream, tmp_path):
     task = export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate_regression)
     body = b"## Bug\r\n```nim\r\nold()\r\n```"
     assert (task / "instruction.md").read_text() == (
-        "Fix the problems reported in `/workspace/41.md` for `/workspace/Nim`.\n"
+        "Fix the problem reported in `/workspace/41.md` for `/workspace/Nim`.\n"
     )
     assert (task / "environment/41.md").read_bytes() == body
     assert not (task / "environment/{issue_id}.md").exists()
@@ -179,6 +179,10 @@ def test_export_includes_every_linked_issue_in_agent_context(upstream, tmp_path)
     )
     task = export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate_regression)
     instruction = (task / "instruction.md").read_text()
+    assert instruction == (
+        "Fix the problems reported in `/workspace/41.md`, `/workspace/43.md` "
+        "for `/workspace/Nim`.\n"
+    )
     dockerfile = (task / "environment/Dockerfile").read_text()
     allowed = (task / "environment/.dockerignore").read_text().splitlines()
     for number in (41, 43):

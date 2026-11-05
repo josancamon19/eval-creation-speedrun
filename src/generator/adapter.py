@@ -442,6 +442,7 @@ def _stage_task(repo: Path, pr: dict, info: dict, selection: dict, task: Path) -
     instruction = (
         (TEMPLATE / "instruction.md")
         .read_bytes()
+        .replace(b"{problem_label}", b"problem" if len(issues) == 1 else b"problems")
         .replace(
             b"{issue_paths}",
             ", ".join(f"`/workspace/{name}`" for name in issue_files).encode("ascii"),
