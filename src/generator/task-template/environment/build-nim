@@ -1,0 +1,7 @@
+#!/bin/bash
+set -euo pipefail
+cd "${1:-/workspace/Nim}"
+mkdir -p bin
+exec /opt/nim-bootstrap/bin/nim c --lib:"$PWD/lib" --noNimblePath \
+  --skipUserCfg --skipParentCfg --parallelBuild:4 -d:release \
+  --nimcache:"$PWD/nimcache/compiler" -o:"$PWD/bin/nim" compiler/nim.nim

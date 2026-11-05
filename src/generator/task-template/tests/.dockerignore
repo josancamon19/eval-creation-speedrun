@@ -1,0 +1,14 @@
+*
+!Dockerfile
+!source.tar.gz
+!dependencies.tar.gz
+!build-nim
+!test.sh
+!verify.py
+!case_runner.py
+!ctrf.py
+!scoring.py
+!platform.json
+!manifest.json
+!fixtures/
+!fixtures/**

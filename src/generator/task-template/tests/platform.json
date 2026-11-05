@@ -1,0 +1,20 @@
+{
+  "environment": {"os": "linux", "cpu": "amd64", "backend": "c"},
+  "reserved_defines": [
+    "linux", "unix", "posix", "amd64", "x8664", "x86", "cpu64", "cpu32",
+    "cpu16", "cpu8", "littleendian", "bigendian", "hostos", "hostcpu",
+    "targetos", "targetcpu", "c", "cpp", "objc", "objectivec", "js", "nimvm",
+    "windows", "win", "win32", "win64", "dos", "os2", "morphos", "skyos",
+    "solaris", "irix", "netbsd", "freebsd", "openbsd", "dragonfly", "bsd",
+    "crossos", "aix", "palmos", "qnx", "amiga", "atari", "netware", "macos",
+    "macosx", "osx", "darwin", "ios", "haiku", "android", "vxworks", "genode",
+    "standalone", "nintendoswitch", "freertos", "zephyr", "nuttx", "any", "illumos",
+    "i386", "i686", "m68k", "alpha", "powerpc", "powerpc64", "powerpc64el",
+    "sparc", "vm", "hppa", "ia64", "mips", "mipsel", "arm", "arm64", "aarch64",
+    "avr", "msp430", "sparc64", "s390x", "mips64", "mips64el", "riscv32",
+    "riscv64", "esp", "wasm", "wasm32", "wasm64", "e2k", "loongarch64",
+    "mingw", "mingw32", "mingw64", "mingww64", "cygwin", "androidndk",
+    "emscripten", "iossimulator", "mswindows", "msdos", "macintosh", "sunos",
+    "itanium", "lwip", "nodejs", "nimscript", "emulatedthreadvars", "nimrawsetjmp"
+  ]
+}
