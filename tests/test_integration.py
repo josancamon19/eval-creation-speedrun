@@ -169,11 +169,84 @@ def test_legacy_diagnostic_file_expectations_remain_rejected(repository, directi
 
 
 @pytest.mark.parametrize(
+    ("directives", "expected_options"),
+    [
+        (
+            'cmd: "nim c -d:enabled -d:count=2 -r $file"',
+            [["-d:enabled", "-d:count=2"]],
+        ),
+        (
+            'cmd: "nim c --gc:refc $options -d:tag=ok $file"\naction: run\n'
+            'matrix: "--threads:on; --threads:off"',
+            [
+                ["--gc:refc", "--threads:on", "-d:tag=ok"],
+                ["--gc:refc", "--threads:off", "-d:tag=ok"],
+            ],
+        ),
+        (
+            'cmd: "nim c --newruntime $file"\noutput: "OK"',
+            [["--newruntime"]],
+        ),
+    ],
+)
+def test_standard_compile_run_commands_use_validated_options(
+    repository, directives, expected_options
+):
+    path = "tests/tcommand.nim"
+    repo, head = repository({path: f'discard """\n{directives}\n"""\necho "OK"\n'})
+    result = collect(repo, head, [path])
+    assert result["rejected"] == {}
+    assert [case["options"] for case in result["cases"]] == expected_options
+    assert {case["path"] for case in result["cases"]} == {path}
+    assert {case["target"] for case in result["cases"]} == {"c"}
+    assert all("cmd" not in case for case in result["cases"])
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python helper.py $file",
+        "nim cpp -r $file",
+        "nim check $file",
+        "nim c -r $file && touch marker",
+        "nim c ; -r $file",
+        "nim c && -r $file",
+        "nim c $(whoami) -r $file",
+        "nim c --assertions:off -r $file",
+        "nim c -d:windows -r $file",
+        "nim c --lib:other -r $file",
+        "nim c -r $file extra",
+        "nim c $options $options -r $file",
+        "nim c -r -r $file",
+        "nim c $file",
+    ],
+)
+def test_custom_or_unsafe_commands_remain_rejected(repository, command):
+    path = "tests/tcommand.nim"
+    repo, head = repository({path: f'discard """\ncmd: "{command}"\n"""\ndiscard\n'})
+    result = collect(repo, head, [path])
+    assert result["cases"] == []
+    assert path in result["rejected"]
+
+
+def test_command_cannot_silently_change_ignored_matrix_options(repository):
+    path = "tests/tcommand.nim"
+    repo, head = repository(
+        {
+            path: 'discard """\ncmd: "nim c -r $file"\nmatrix: "--threads:on"\n"""\ndiscard\n'
+        }
+    )
+    result = collect(repo, head, [path])
+    assert result["cases"] == []
+    assert path in result["rejected"]
+
+
+@pytest.mark.parametrize(
     "directive",
     [
         "action: compile",
         "action: reject",
-        'cmd: "nim c -r $file"',
+        'cmd: "nim check $file"',
         'nimout: "Hint: ok"',
         "nimoutFull: true",
         'ccodecheck: "foo"',

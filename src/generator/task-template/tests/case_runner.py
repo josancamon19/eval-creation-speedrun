@@ -218,6 +218,8 @@ def validate_options(options):
     for option in options:
         if not isinstance(option, str):
             raise ValueError("case option must be a string")
+        if option == "--newruntime":
+            continue
         define = re.fullmatch(
             r"(-d|--define):([A-Za-z][A-Za-z0-9_]*)(?:=([A-Za-z0-9_.-]+))?", option
         )

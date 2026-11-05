@@ -161,6 +161,27 @@ _UNSAFE_DEFINES = {
 }
 
 
+def _validate_options(options: list[str]) -> None:
+    for option in options:
+        # Historical Nim's runtime selector; preserve its exact semantics.
+        if option == "--newruntime":
+            continue
+        match = re.fullmatch(
+            r"(-d|--define):([A-Za-z][A-Za-z0-9_]*)(?:=([A-Za-z0-9_.-]+))?", option
+        )
+        if match:
+            if _normal(match[2]) in _UNSAFE_DEFINES:
+                raise _Rejected(f"assertion-disabling define: {option}")
+            if _normal(match[2]) in _RESERVED_DEFINES:
+                raise _Rejected(
+                    f"platform/backend define is unsupported for Linux amd64 C: {option}"
+                )
+            continue
+        match = re.fullmatch(r"--([A-Za-z]+):([A-Za-z0-9_]+)", option)
+        if not match or _normal(match[2]) not in _OPTIONS.get(_normal(match[1]), set()):
+            raise _Rejected(f"unsupported compiler option: {option}")
+
+
 def _options(value: str) -> list[list[str]]:
     configs = []
     for part in value.split(";"):
@@ -168,23 +189,39 @@ def _options(value: str) -> list[list[str]]:
             options = shlex.split(part)
         except ValueError as error:
             raise _Rejected(f"invalid matrix options: {error}") from error
-        for option in options:
-            match = re.fullmatch(
-                r"(-d|--define):([A-Za-z][A-Za-z0-9_]*)(?:=([A-Za-z0-9_.-]+))?", option
-            )
-            if match:
-                if _normal(match[2]) in _UNSAFE_DEFINES:
-                    raise _Rejected(f"assertion-disabling define: {option}")
-                if _normal(match[2]) in _RESERVED_DEFINES:
-                    raise _Rejected(
-                        f"platform/backend define is unsupported for Linux amd64 C: {option}"
-                    )
-                continue
-            match = re.fullmatch(r"--([A-Za-z]+):([A-Za-z0-9_]+)", option)
-            if not match or _normal(match[2]) not in _OPTIONS.get(
-                _normal(match[1]), set()
-            ):
-                raise _Rejected(f"unsupported compiler option: {option}")
+        _validate_options(options)
+        if options not in configs:
+            configs.append(options)
+    return configs
+
+
+def _command_options(command: str, matrix: str, explicit_run: bool) -> list[list[str]]:
+    """Translate a bounded Nim C command into options, never executable text."""
+    try:
+        arguments = shlex.split(command)
+    except ValueError as error:
+        raise _Rejected(f"invalid compiler command: {error}") from error
+    if (
+        arguments[:2] != ["nim", "c"]
+        or arguments[-1:] != ["$file"]
+        or arguments.count("$file") != 1
+        or arguments.count("$options") > 1
+        or arguments.count("-r") > 1
+    ):
+        raise _Rejected("unsupported compiler command; expected nim c [options] $file")
+    if not explicit_run and "-r" not in arguments:
+        raise _Rejected("compiler command requires an explicit run test")
+    if matrix.strip() and "$options" not in arguments:
+        raise _Rejected("compiler command does not apply its matrix options")
+    configs = []
+    for matrix_options in _options(matrix):
+        options = []
+        for argument in arguments[2:-1]:
+            if argument == "$options":
+                options.extend(matrix_options)
+            elif argument != "-r":
+                options.append(argument)
+        _validate_options(options)
         if options not in configs:
             configs.append(options)
     return configs
@@ -296,7 +333,7 @@ def _spec(text: str) -> dict:
         elif key == "exitcode":
             if not re.fullmatch(r"[0-9]+", value) or not 0 <= int(value) <= 255:
                 raise _Rejected(f"unsupported exit code: {value}")
-        elif key not in {"output", "outputsub", "input", "matrix", "file"}:
+        elif key not in {"output", "outputsub", "input", "matrix", "file", "cmd"}:
             raise _Rejected(f"unsupported spec directive: {key}")
         values[key] = value
     # Historical Testament uses `file` only when comparing diagnostics.
@@ -309,8 +346,19 @@ def _spec(text: str) -> dict:
         raise _Rejected("diagnostic file expectations require an explicit run test")
     if "output" in values and "outputsub" in values:
         raise _Rejected("ambiguous output and outputsub directives")
+    matrix = values.get("matrix", "")
+    configurations = (
+        _command_options(
+            values["cmd"],
+            matrix,
+            _normal(values.get("action", "")) == "run"
+            or bool({"output", "outputsub"}.intersection(values)),
+        )
+        if "cmd" in values
+        else _options(matrix)
+    )
     return {
-        "configurations": _options(values.get("matrix", "")),
+        "configurations": configurations,
         "expected_output": values.get("outputsub", "").strip()
         if "outputsub" in values
         else values.get("output"),
