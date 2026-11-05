@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from generator.filters.fail_to_pass import (
+    CalibrationInconclusive,
     EvaluationError,
     HarborEvaluator,
     validate_fail_to_pass,
@@ -268,3 +269,135 @@ def test_harbor_batches_both_states_and_matches_results_by_identity(
 def test_evaluation_concurrency_must_be_positive(concurrency):
     with pytest.raises(ValueError, match="positive"):
         HarborEvaluator(concurrency=concurrency)
+
+
+def inconclusive_report(cases):
+    result = report(cases, ["passed"] * len(cases))
+    result.update(status="infrastructure_error", reward=None)
+    result["checks"][0].update(
+        status="infrastructure_error",
+        passed=False,
+        run_exit_code=1,
+        error="resource exhaustion diagnostic",
+    )
+    return result
+
+
+def test_inconclusive_calibration_identifies_the_case_and_resource_failure(candidate):
+    task, cases = candidate
+    reports = {
+        "nop": inconclusive_report(cases),
+        "oracle": report(cases, ["passed"] * len(cases)),
+    }
+    with pytest.raises(
+        CalibrationInconclusive,
+        match=r"nop:.*tests/t0.nim.*resource exhaustion diagnostic",
+    ):
+        validate_fail_to_pass(task, lambda path, agent: reports[agent])
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None,
+        "missing_report",
+        "invalid_json",
+        "nonobject_report",
+        "missing_check",
+        "duplicate_check",
+        "missing_error",
+        "missing_exit_codes",
+        "no_inconclusive_check",
+        "bad_build",
+        "bad_smoke",
+        "numeric_reward",
+        "missing_reward",
+        "wrong_exception",
+        "passed_report",
+        "nonzero_process",
+    ],
+)
+def test_harbor_preserves_only_complete_intentional_null_reward_reports(
+    candidate, tmp_path, monkeypatch, fault
+):
+    from types import SimpleNamespace
+
+    task, cases = candidate
+    requests = []
+
+    def run(command, **kwargs):
+        config = json.loads(Path(command[-1]).read_text())
+        requests.append(config)
+        for agent in ("nop", "oracle"):
+            trial = Path(config["jobs_dir"]) / "2026-11-04__00-00-00" / agent
+            (trial / "verifier").mkdir(parents=True)
+            exception = None
+            observed = report(cases, ["passed"] * len(cases))
+            if agent == "nop":
+                exception = {"exception_type": "RewardFileNotFoundError"}
+                observed = inconclusive_report(cases)
+                if fault == "missing_check":
+                    observed["checks"].pop()
+                elif fault == "duplicate_check":
+                    observed["checks"].append(observed["checks"][0])
+                elif fault == "missing_error":
+                    observed["checks"][0].pop("error")
+                elif fault == "missing_exit_codes":
+                    observed["checks"][0].pop("run_exit_code")
+                elif fault == "no_inconclusive_check":
+                    observed["checks"] = report(cases, ["passed"] * len(cases))[
+                        "checks"
+                    ]
+                elif fault == "bad_build":
+                    observed["build"] = 1
+                elif fault == "bad_smoke":
+                    observed["smoke"]["passed"] = False
+                elif fault == "numeric_reward":
+                    observed["reward"] = 0
+                elif fault == "missing_reward":
+                    observed.pop("reward")
+                elif fault == "wrong_exception":
+                    exception["exception_type"] = "SandboxBuildFailedError"
+                elif fault == "passed_report":
+                    observed = report(cases, ["passed"] * len(cases))
+                    observed["reward"] = 1
+            (trial / "result.json").write_text(
+                json.dumps(
+                    {
+                        "task_name": task.name,
+                        "config": {
+                            "task": {"path": str(task)},
+                            "agent": {"name": agent},
+                        },
+                        "exception_info": exception,
+                    }
+                )
+            )
+            if agent == "nop" and fault == "missing_report":
+                continue
+            text = json.dumps(observed)
+            if agent == "nop" and fault == "invalid_json":
+                text = "{unfinished"
+            elif agent == "nop" and fault == "nonobject_report":
+                text = "[]"
+            (trial / "verifier/report.json").write_text(text)
+        return SimpleNamespace(returncode=1 if fault == "nonzero_process" else 0)
+
+    monkeypatch.setattr("generator.filters.fail_to_pass.subprocess.run", run)
+    evaluator = HarborEvaluator(jobs_dir=tmp_path / "jobs", concurrency=2)
+    if fault:
+        with pytest.raises(EvaluationError) as error:
+            evaluator.evaluate_many([task])
+        assert type(error.value) is EvaluationError
+    else:
+        results = evaluator.evaluate_many([task])[task.name]
+        assert results["nop"]["reward"] is None
+        assert results["nop"]["status"] == "infrastructure_error"
+        assert results["nop"]["checks"] == inconclusive_report(cases)["checks"]
+        assert results["nop"]["harbor_exception"] == {
+            "exception_type": "RewardFileNotFoundError"
+        }
+        assert results["oracle"]["status"] == "passed"
+    assert len(requests) == 1
+    assert requests[0]["n_attempts"] == 1
+    assert requests[0]["retry"] == {"max_retries": 0}

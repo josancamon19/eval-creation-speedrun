@@ -71,9 +71,11 @@ class ExportCache:
             if entry["key"] != key:
                 return None
             if entry["status"] == "rejected":
-                if entry["stage"] in {"static", "calibration"} and isinstance(
-                    entry["reason"], str
-                ):
+                if entry["stage"] in {
+                    "static",
+                    "calibration",
+                    "calibration_inconclusive",
+                } and isinstance(entry["reason"], str):
                     return entry
             elif entry["status"] == "accepted":
                 task = (self.root / entry["artifact"]).resolve()
@@ -95,7 +97,7 @@ class ExportCache:
             "key": key,
             "number": pr["number"],
             "url": pr.get("url"),
-            "merge_commit": pr["mergeCommit"]["oid"],
+            "merge_commit": (pr.get("mergeCommit") or {}).get("oid"),
             "recorded_at": datetime.now(UTC).isoformat(),
             "inputs": self.signature,
             **decision,

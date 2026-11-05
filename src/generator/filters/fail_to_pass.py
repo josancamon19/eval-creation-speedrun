@@ -21,25 +21,35 @@ class EvaluationError(RuntimeError):
     """Evaluation did not supply trustworthy evidence; stop rather than export."""
 
 
+class CalibrationInconclusive(EvaluationError):
+    """Complete verifier evidence identifies a candidate that cannot be scored."""
+
+
 def _checks(report: dict, cases: list[dict], agent: str) -> dict[str, dict]:
     if report.get("environment") != ENVIRONMENT:
         raise EvaluationError(f"{agent}: missing or unsupported execution environment")
     if (
-        report.get("status") not in {"passed", "failed"}
+        report.get("status") not in {"passed", "failed", "infrastructure_error"}
         or report.get("build") != 0
         or report.get("smoke", {}).get("passed") is not True
     ):
         raise EvaluationError(f"{agent}: build or independent smoke test failed")
+    inconclusive = report["status"] == "infrastructure_error"
+    if inconclusive and ("reward" not in report or report["reward"] is not None):
+        raise EvaluationError(f"{agent}: infrastructure failure must have null reward")
     checks = report.get("checks", [])
+    if not isinstance(checks, list) or any(not isinstance(c, dict) for c in checks):
+        raise EvaluationError(f"{agent}: invalid case results")
     by_id = {check.get("id"): check for check in checks}
     if len(by_id) != len(checks) or set(by_id) != {c["id"] for c in cases}:
         raise EvaluationError(
             f"{agent}: missing, duplicate, or unexpected case results"
         )
+    errors = []
     for case in cases:
         check = by_id[case["id"]]
         status = check.get("status")
-        if status not in FAILURES | INCONCLUSIVE | {"passed"}:
+        if status not in FAILURES | INCONCLUSIVE | {"passed", "infrastructure_error"}:
             raise EvaluationError(
                 f"{agent}: inconclusive infrastructure result for {case['id']}"
             )
@@ -64,10 +74,32 @@ def _checks(report: dict, cases: list[dict], agent: str) -> dict[str, dict]:
                 and run_code >= 0
                 and run_code != case.get("expected_exit", 0)
             )
+        elif status == "infrastructure_error":
+            error = check.get("error")
+            if (
+                not inconclusive
+                or not isinstance(error, str)
+                or not error.strip()
+                or "compile_exit_code" not in check
+                or "run_exit_code" not in check
+            ):
+                raise EvaluationError(
+                    f"{agent}: incomplete infrastructure result for {case['id']}"
+                )
+            valid = all(
+                code is None or type(code) is int for code in (compile_code, run_code)
+            )
+            errors.append(f"{case['id']} ({case['path']}): {error}")
         else:
             valid = True  # These never qualify as regression evidence.
         if not valid:
             raise EvaluationError(f"{agent}: inconsistent exit codes for {case['id']}")
+    if inconclusive:
+        if not errors:
+            raise EvaluationError(f"{agent}: infrastructure failure has no case error")
+        raise CalibrationInconclusive(
+            f"{agent}: inconclusive infrastructure results: " + "; ".join(errors)
+        )
     return by_id
 
 
@@ -88,9 +120,14 @@ def validate_fail_to_pass(task: Path, evaluate: Callable[[Path, str], dict]) -> 
         if isinstance(evaluate, HarborEvaluator)
         else {agent: evaluate(task, agent) for agent in ("nop", "oracle")}
     )
-    indexed = {}
+    indexed, inconclusive = {}, []
     for agent in ("nop", "oracle"):
-        indexed[agent] = _checks(reports[agent], cases, agent)
+        try:
+            indexed[agent] = _checks(reports[agent], cases, agent)
+        except CalibrationInconclusive as error:
+            inconclusive.append(str(error))
+    if inconclusive:
+        raise CalibrationInconclusive("; ".join(inconclusive))
     kept, rejected, regressions = [], {}, {}
     for case in cases:
         key = case["id"]
@@ -258,7 +295,11 @@ class HarborEvaluator:
                     f"Unexpected or duplicate trial identity; see {result_path}"
                 )
             seen.add(key)
-            if result.get("exception_info"):
+            exception = result.get("exception_info")
+            if (
+                exception
+                and exception.get("exception_type") != "RewardFileNotFoundError"
+            ):
                 raise EvaluationError(
                     f"{name}/{agent}: Harbor trial failed; see {result_path}"
                 )
@@ -267,7 +308,25 @@ class HarborEvaluator:
                 raise EvaluationError(
                     f"{name}/{agent}: missing verifier report; see {result_path}"
                 )
-            report = json.loads(report_path.read_text())
+            try:
+                report = json.loads(report_path.read_text())
+            except (OSError, ValueError) as error:
+                raise EvaluationError(
+                    f"{name}/{agent}: unreadable verifier report; see {report_path}"
+                ) from error
+            if not isinstance(report, dict):
+                raise EvaluationError(
+                    f"{name}/{agent}: invalid verifier report; see {report_path}"
+                )
+            if exception:
+                try:
+                    _checks(report, task_spec(identities[name])["cases"], agent)
+                except CalibrationInconclusive:
+                    report["harbor_exception"] = exception
+                else:
+                    raise EvaluationError(
+                        f"{name}/{agent}: unexpected missing reward; see {result_path}"
+                    )
             report["harbor_report"] = str(report_path)
             reports[name][agent] = report
         return reports

@@ -673,3 +673,97 @@ def test_cached_task_never_overwrites_modified_output(upstream, tmp_path):
             cache_dir=cache,
         )
     assert instruction.read_text() == "local edits"
+
+
+def test_static_rejection_with_null_merge_commit_is_cached_and_reused(
+    upstream, tmp_path
+):
+    repo, _, pr = upstream
+    pr.update(mergeCommit=None, closingIssuesReferences={"nodes": []})
+    cache = tmp_path / "cache"
+    backend = RecordingBackend(unavailable=True)
+    first = adapter.export_tasks(
+        repo, [pr], tmp_path / "first", evaluator=backend, cache_dir=cache
+    )
+    assert first["exported"] == []
+    assert first["calibrated"] == 0
+    assert first["rejected"][0]["stage"] == "static"
+    assert "linked issue" in first["rejected"][0]["reason"]
+    entries = list((cache / "entries").glob("*.json"))
+    assert len(entries) == 1
+    entry = json.loads(entries[0].read_text())
+    assert entry["merge_commit"] is None
+    assert entry["status"] == "rejected"
+
+    second = adapter.export_tasks(
+        repo, [pr], tmp_path / "second", evaluator=backend, cache_dir=cache
+    )
+    assert second["exported"] == []
+    assert second["calibrated"] == 0
+    assert second["cache_hits"] == {"accepted": 0, "rejected": 1}
+    assert second["rejected"][0]["cached"] is True
+    assert second["rejected"][0]["reason"] == first["rejected"][0]["reason"]
+    assert backend.batches == []
+
+
+@pytest.mark.parametrize("corrupt_oracle", [False, True])
+def test_batch_isolates_and_caches_complete_inconclusive_calibration(
+    upstream, tmp_path, corrupt_oracle
+):
+    repo, _, pr = upstream
+    prs = [dict(pr, number=43), pr]
+    cache, output = tmp_path / "cache", tmp_path / "tasks"
+
+    class Backend(RecordingBackend):
+        def evaluate_many(self, tasks):
+            reports = super().evaluate_many(tasks)
+            nop = reports["nim-pr-42"]["nop"]
+            nop.update(status="infrastructure_error", reward=None)
+            nop["checks"][0].update(
+                status="infrastructure_error",
+                error="resource exhaustion diagnostic",
+            )
+            if corrupt_oracle:
+                reports["nim-pr-42"]["oracle"]["checks"].clear()
+            return reports
+
+    backend = Backend(concurrency=4)
+    if corrupt_oracle:
+        with pytest.raises(EvaluationError, match="missing"):
+            adapter.export_tasks(
+                repo, prs, output, limit=2, evaluator=backend, cache_dir=cache
+            )
+        assert not list(output.glob("nim-pr-*"))
+        assert not list((cache / "entries").glob("*.json"))
+        return
+
+    result = adapter.export_tasks(
+        repo, prs, output, limit=2, evaluator=backend, cache_dir=cache
+    )
+    assert [task.name for task in result["exported"]] == ["nim-pr-43"]
+    assert not (output / "nim-pr-42").exists()
+    rejection = result["rejected"][0]
+    assert rejection["stage"] == "calibration_inconclusive"
+    assert "tests/stdlib/tnew.nim" in rejection["reason"]
+    assert "resource exhaustion diagnostic" in rejection["reason"]
+    assert backend.batches == [["nim-pr-43", "nim-pr-42"]]
+    entries = [json.loads(p.read_text()) for p in (cache / "entries").glob("*.json")]
+    rejected = next(entry for entry in entries if entry["number"] == 42)
+    assert rejected["stage"] == "calibration_inconclusive"
+    assert rejected["reports"]["nop"]["reward"] is None
+    assert rejected["reports"]["nop"]["checks"][0]["error"] == (
+        "resource exhaustion diagnostic"
+    )
+    offline = RecordingBackend(unavailable=True)
+    restored = adapter.export_tasks(
+        repo,
+        prs,
+        tmp_path / "restored",
+        limit=2,
+        evaluator=offline,
+        cache_dir=cache,
+    )
+    assert [task.name for task in restored["exported"]] == ["nim-pr-43"]
+    assert restored["cache_hits"] == {"accepted": 1, "rejected": 1}
+    assert restored["calibrated"] == 0
+    assert offline.batches == []

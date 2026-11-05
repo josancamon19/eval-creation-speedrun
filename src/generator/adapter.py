@@ -13,6 +13,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from generator.filters.fail_to_pass import (
+    CalibrationInconclusive,
     HarborEvaluator,
     save_validation_evidence,
     validate_fail_to_pass,
@@ -350,14 +351,26 @@ def export_tasks(
                     evidence = validate_fail_to_pass(
                         staged, lambda path, agent: reports[path.name][agent]
                     )
+                except CalibrationInconclusive as error:
+                    disqualified.append(
+                        (
+                            pr,
+                            key,
+                            "calibration_inconclusive",
+                            str(error),
+                            reports[staged.name],
+                        )
+                    )
                 except ValueError as error:
-                    disqualified.append((pr, key, str(error), reports[staged.name]))
+                    disqualified.append(
+                        (pr, key, "calibration", str(error), reports[staged.name])
+                    )
                 else:
                     qualified.append((pr, key, info, selection, staged, task, evidence))
-            for pr, key, reason, observations in disqualified:
+            for pr, key, stage, reason, observations in disqualified:
                 if cache and key:
-                    cache.reject(key, pr, "calibration", reason, observations)
-                reject(pr, reason, "calibration")
+                    cache.reject(key, pr, stage, reason, observations)
+                reject(pr, reason, stage)
             for pr, key, info, selection, staged, task, evidence in qualified:
                 _publish_task(repo, info, selection, staged, task, evidence)
                 if cache and key:
