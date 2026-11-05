@@ -48,7 +48,7 @@ overwritten. Cache keys include the repository path, PR metadata and merge commi
 filter/calibration code, task template, dependency lock, target and execution
 backend. Changes to these inputs trigger fresh checks. Cached task contents and
 file modes are verified before reuse. Infrastructure failures are not cached.
-Use `--cache-dir PATH` to choose a cache or `--no-cache` to read/write none. The
+The cache location is fixed at `.cache/exports/`; use `--no-cache` to read/write none. The
 summary reports accepted/rejected cache hits and newly calibrated PRs. The Python
 `export_tasks` API enables the same behavior when passed `cache_dir=Path(...)`.
 Exports created before this cache was added need one fresh evaluation.
