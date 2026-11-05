@@ -362,7 +362,9 @@ def export_tasks(
             for pr, info, selection, staged, task, key in pending:
                 try:
                     evidence = validate_fail_to_pass(
-                        staged, lambda path, agent: reports[path.name][agent]
+                        staged,
+                        lambda path, agent: reports[path.name][agent],
+                        confirm=lambda path: backend.evaluate_many([path])[path.name],
                     )
                 except CalibrationInconclusive as error:
                     disqualified.append(

@@ -14,7 +14,10 @@ from generator.utils.task_data import task_spec
 
 FAILURES = {"compile_error", "wrong_exit", "wrong_output"}
 INCONCLUSIVE = {"timeout", "runtime_signal", "compiler_signal"}
-POLICY = "nim-blackbox-fail-to-pass-and-regressions-linux-amd64-c-v3"
+# Linux fault signals, independent of the host running the exporter. Resource
+# limits, SIGKILL and SIGTERM do not establish compiler defects.
+_COMPILER_FAULT_SIGNALS = {4, 6, 7, 8, 11}
+POLICY = "nim-blackbox-fail-to-pass-and-regressions-linux-amd64-c-v4"
 
 
 class EvaluationError(RuntimeError):
@@ -23,6 +26,18 @@ class EvaluationError(RuntimeError):
 
 class CalibrationInconclusive(EvaluationError):
     """Complete verifier evidence identifies a candidate that cannot be scored."""
+
+
+def _compiler_fault(check: dict) -> int | None:
+    code = check.get("compile_exit_code")
+    if (
+        check.get("status") != "compiler_signal"
+        or type(code) is not int
+        or check.get("run_exit_code") is not None
+    ):
+        return None
+    signal = -code if code < 0 else code - 128
+    return signal if signal in _COMPILER_FAULT_SIGNALS else None
 
 
 def _checks(report: dict, cases: list[dict], agent: str) -> dict[str, dict]:
@@ -74,6 +89,12 @@ def _checks(report: dict, cases: list[dict], agent: str) -> dict[str, dict]:
                 and run_code >= 0
                 and run_code != case.get("expected_exit", 0)
             )
+        elif status == "compiler_signal":
+            valid = (
+                type(compile_code) is int
+                and (-64 <= compile_code < 0 or 128 < compile_code <= 192)
+                and run_code is None
+            )
         elif status == "infrastructure_error":
             error = check.get("error")
             if (
@@ -91,7 +112,7 @@ def _checks(report: dict, cases: list[dict], agent: str) -> dict[str, dict]:
             )
             errors.append(f"{case['id']} ({case['path']}): {error}")
         else:
-            valid = True  # These never qualify as regression evidence.
+            valid = True  # Runtime signals and timeouts never qualify.
         if not valid:
             raise EvaluationError(f"{agent}: inconsistent exit codes for {case['id']}")
     if inconclusive:
@@ -103,7 +124,56 @@ def _checks(report: dict, cases: list[dict], agent: str) -> dict[str, dict]:
     return by_id
 
 
-def validate_fail_to_pass(task: Path, evaluate: Callable[[Path, str], dict]) -> dict:
+def _confirm_crashes(task, cases, kept, crash_ids, initial, confirm, hashes):
+    if task_hashes(task) != hashes:
+        raise EvaluationError("Task changed during initial compiler-crash controls")
+    repeated = confirm(task)
+    if task_hashes(task) != hashes:
+        raise EvaluationError("Task changed during compiler-crash confirmation")
+    identities = [
+        runs[agent].get("harbor_report")
+        for runs in (initial, repeated)
+        for agent in ("nop", "oracle")
+    ]
+    if (
+        any(not isinstance(p, str) or not p for p in identities)
+        or len(set(identities)) != 4
+    ):
+        raise EvaluationError(
+            "Compiler-crash controls require four distinct run identities"
+        )
+    first = {
+        agent: _checks(initial[agent], cases, agent) for agent in ("nop", "oracle")
+    }
+    second = {
+        agent: _checks(repeated[agent], cases, f"confirmation/{agent}")
+        for agent in ("nop", "oracle")
+    }
+    for case in kept:
+        key = case["id"]
+        before, again = first["nop"][key], second["nop"][key]
+        if second["oracle"][key]["status"] != "passed":
+            raise CalibrationInconclusive(f"Reference did not pass again for {key}")
+        if key in crash_ids:
+            stable = _compiler_fault(again) == _compiler_fault(before)
+        else:
+            stable = all(
+                again.get(field) == before.get(field)
+                for field in ("status", "compile_exit_code", "run_exit_code")
+            )
+        if not stable:
+            raise CalibrationInconclusive(
+                f"Baseline result did not reproduce for {key}"
+            )
+    return {"case_ids": crash_ids, "runs": repeated, "sha256": hashes}
+
+
+def validate_fail_to_pass(
+    task: Path,
+    evaluate: Callable[[Path, str], dict],
+    *,
+    confirm: Callable[[Path], dict] | None = None,
+) -> dict:
     """Require a real fix and preserve every observed baseline-passing assertion."""
     manifest = task_spec(task)
     if manifest.get("environment") != ENVIRONMENT:
@@ -115,6 +185,7 @@ def validate_fail_to_pass(task: Path, evaluate: Callable[[Path, str], dict]) -> 
         raise ValueError(
             "candidate must distinguish PR tests from base regression tests"
         )
+    hashes = task_hashes(task)
     reports = (
         evaluate.evaluate_many([task])[task.name]
         if isinstance(evaluate, HarborEvaluator)
@@ -128,7 +199,7 @@ def validate_fail_to_pass(task: Path, evaluate: Callable[[Path, str], dict]) -> 
             inconclusive.append(str(error))
     if inconclusive:
         raise CalibrationInconclusive("; ".join(inconclusive))
-    kept, rejected, regressions = [], {}, {}
+    kept, rejected, regressions, crash_ids = [], {}, {}, []
     for case in cases:
         key = case["id"]
         before, after = indexed["nop"][key], indexed["oracle"][key]
@@ -145,7 +216,7 @@ def validate_fail_to_pass(task: Path, evaluate: Callable[[Path, str], dict]) -> 
                 f"existing-behavior test excluded: baseline {before['status']} "
                 "does not establish passing behavior"
             )
-        elif before["status"] not in FAILURES:
+        elif before["status"] not in FAILURES and _compiler_fault(before) is None:
             rejected[key] = f"baseline {before['status']} is not regression evidence"
         elif after["status"] != "passed":
             rejected[key] = (
@@ -153,6 +224,8 @@ def validate_fail_to_pass(task: Path, evaluate: Callable[[Path, str], dict]) -> 
             )
         else:
             kept.append({**case, "role": "fail_to_pass"})
+            if before["status"] == "compiler_signal":
+                crash_ids.append(key)
     if regressions:
         raise ValueError(
             "reference implementation causes existing-behavior regressions: "
@@ -167,6 +240,20 @@ def validate_fail_to_pass(task: Path, evaluate: Callable[[Path, str], dict]) -> 
             "no baseline-passing existing-behavior regression cases: "
             + json.dumps(rejected, sort_keys=True)
         )
+    confirmation = None
+    if crash_ids:
+        if confirm is None and isinstance(evaluate, HarborEvaluator):
+
+            def confirm(path):
+                return evaluate.evaluate_many([path])[path.name]
+
+        if confirm is None:
+            raise CalibrationInconclusive(
+                "Compiler crashes require independent baseline/reference confirmation"
+            )
+        confirmation = _confirm_crashes(
+            task, cases, kept, crash_ids, reports, confirm, hashes
+        )
     return {
         "policy": POLICY,
         "environment": dict(ENVIRONMENT),
@@ -179,6 +266,7 @@ def validate_fail_to_pass(task: Path, evaluate: Callable[[Path, str], dict]) -> 
         },
         "rejected": rejected,
         "runs": reports,
+        **({"compiler_crash_confirmation": confirmation} if confirmation else {}),
     }
 
 

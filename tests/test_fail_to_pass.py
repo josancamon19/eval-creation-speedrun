@@ -20,10 +20,16 @@ def report(cases, statuses):
                 "path": case["path"],
                 "status": status,
                 "passed": status == "passed",
-                "compile_exit_code": 1 if status == "compile_error" else 0,
+                "compile_exit_code": -11
+                if status == "compiler_signal"
+                else (1 if status == "compile_error" else 0),
                 "run_exit_code": None
-                if status == "compile_error"
-                else (1 if status == "wrong_exit" else 0),
+                if status in {"compile_error", "compiler_signal"}
+                else (
+                    -11
+                    if status == "runtime_signal"
+                    else (1 if status == "wrong_exit" else 0)
+                ),
             }
         )
     return {
@@ -168,7 +174,7 @@ def test_noop_pass_is_not_a_task(candidate):
         validate_fail_to_pass(task, lambda path, agent: report(cases, ["passed"] * 4))
 
 
-@pytest.mark.parametrize("status", ["timeout", "runtime_signal", "compiler_signal"])
+@pytest.mark.parametrize("status", ["timeout", "runtime_signal"])
 def test_resource_failures_do_not_prove_regression(candidate, status):
     task, cases = candidate
     with pytest.raises(ValueError, match="no fail-to-pass"):
@@ -178,6 +184,123 @@ def test_resource_failures_do_not_prove_regression(candidate, status):
                 cases, [status if agent == "nop" else "passed"] * 4
             ),
         )
+
+
+def crash_pair(cases, name, code=-11):
+    reports = {
+        "nop": report(cases, ["compiler_signal", "passed", "passed", "passed"]),
+        "oracle": report(cases, ["passed"] * 4),
+    }
+    reports["nop"]["checks"][0]["compile_exit_code"] = code
+    for agent, observation in reports.items():
+        observation["harbor_report"] = f"/jobs/{name}/{agent}/verifier/report.json"
+    return reports
+
+
+@pytest.mark.parametrize(
+    ("first_code", "second_code"),
+    [(-11, 139), (139, -11), (-6, 134), (-7, 135), (-4, 132), (-8, 136)],
+)
+def test_compiler_crash_requires_matching_fresh_controls(
+    candidate, first_code, second_code
+):
+    task, cases = candidate
+    initial = crash_pair(cases, "initial", first_code)
+    repeated = crash_pair(cases, "repeat", second_code)
+    calls = []
+
+    def confirm(path):
+        assert path == task
+        calls.append(path)
+        return repeated
+
+    result = validate_fail_to_pass(
+        task, lambda path, agent: initial[agent], confirm=confirm
+    )
+    assert calls == [task]
+    assert result["cases"][0]["role"] == "fail_to_pass"
+    assert result["compiler_crash_confirmation"]["case_ids"] == ["0"]
+    assert result["compiler_crash_confirmation"]["runs"] == repeated
+    assert result["runs"] == initial
+    assert result["counts"]["base_pass_to_pass"] == 1
+
+
+def test_compiler_crash_without_independent_confirmation_is_inconclusive(candidate):
+    task, cases = candidate
+    initial = crash_pair(cases, "initial")
+    with pytest.raises(CalibrationInconclusive, match="independent"):
+        validate_fail_to_pass(task, lambda path, agent: initial[agent])
+
+
+def test_harbor_evaluator_repeats_crash_controls_automatically(candidate):
+    task, cases = candidate
+    calls = []
+
+    class Backend(HarborEvaluator):
+        def evaluate_many(self, tasks):
+            calls.append(tasks)
+            return {task.name: crash_pair(cases, f"run-{len(calls)}")}
+
+    result = validate_fail_to_pass(task, Backend())
+    assert calls == [[task], [task]]
+    assert result["compiler_crash_confirmation"]["case_ids"] == ["0"]
+
+
+@pytest.mark.parametrize("code", [-9, 137, -15, 143, -24, 152])
+def test_kills_and_resource_signals_never_qualify_as_compiler_crashes(candidate, code):
+    task, cases = candidate
+    initial = crash_pair(cases, "initial", code)
+
+    def confirm(path):
+        pytest.fail("Resource failures must not trigger confirmation runs")
+
+    with pytest.raises(ValueError, match="no fail-to-pass"):
+        validate_fail_to_pass(task, lambda path, agent: initial[agent], confirm=confirm)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "baseline_passes",
+        "different_signal",
+        "reference_fails",
+        "regression",
+        "smoke",
+        "reused",
+        "missing_identity",
+        "modified_task",
+    ],
+)
+def test_unreproduced_or_untrustworthy_compiler_crashes_are_rejected(candidate, fault):
+    task, cases = candidate
+    initial = crash_pair(cases, "initial")
+    repeated = crash_pair(cases, "repeat")
+    if fault == "baseline_passes":
+        repeated["nop"]["checks"] = report(cases, ["passed"] * 4)["checks"]
+    elif fault == "different_signal":
+        repeated["nop"]["checks"][0]["compile_exit_code"] = -6
+    elif fault == "reference_fails":
+        repeated["oracle"]["checks"] = report(
+            cases, ["wrong_output", "passed", "passed", "passed"]
+        )["checks"]
+    elif fault == "regression":
+        repeated["nop"]["checks"] = report(
+            cases, ["compiler_signal", "wrong_output", "passed", "passed"]
+        )["checks"]
+    elif fault == "smoke":
+        repeated["nop"]["smoke"]["passed"] = False
+    elif fault == "reused":
+        repeated = initial
+    elif fault == "missing_identity":
+        del repeated["nop"]["harbor_report"]
+
+    def confirm(path):
+        if fault == "modified_task":
+            (path / "tests/verify.py").write_text("CASES = []\n")
+        return repeated
+
+    with pytest.raises(EvaluationError):
+        validate_fail_to_pass(task, lambda path, agent: initial[agent], confirm=confirm)
 
 
 @pytest.mark.parametrize(

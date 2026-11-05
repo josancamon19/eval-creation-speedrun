@@ -607,6 +607,66 @@ class RecordingBackend(HarborEvaluator):
         }
 
 
+@pytest.mark.parametrize("reproduces", [True, False])
+def test_batch_export_confirms_compiler_crashes_before_publishing(
+    upstream, tmp_path, reproduces
+):
+    repo, _, pr = upstream
+    output, cache = tmp_path / "tasks", tmp_path / "cache"
+
+    class Backend(RecordingBackend):
+        def evaluate_many(self, tasks):
+            observations = super().evaluate_many(tasks)
+            for task in tasks:
+                assert not (output / task.name).exists()
+                for agent, observed in observations[task.name].items():
+                    observed["harbor_report"] = (
+                        f"/jobs/run-{len(self.batches)}/{task.name}/{agent}/report.json"
+                    )
+                    for check in observed["checks"]:
+                        if agent == "nop" and check["suite"] == "pr":
+                            if reproduces or len(self.batches) == 1:
+                                check.update(
+                                    status="compiler_signal",
+                                    passed=False,
+                                    compile_exit_code=139,
+                                    run_exit_code=None,
+                                )
+                            else:
+                                check.update(
+                                    status="passed",
+                                    passed=True,
+                                    compile_exit_code=0,
+                                    run_exit_code=0,
+                                )
+            return observations
+
+    backend = Backend()
+    result = adapter.export_tasks(
+        repo, [pr], output, limit=1, evaluator=backend, cache_dir=cache
+    )
+    assert backend.batches == [["nim-pr-42"], ["nim-pr-42"]]
+    if not reproduces:
+        assert result["exported"] == []
+        assert result["rejected"][0]["stage"] == "calibration_inconclusive"
+        assert not (output / "nim-pr-42").exists()
+        return
+    task = result["exported"][0]
+    evidence = json.loads(validation_evidence_path(task).read_text())
+    assert evidence["compiler_crash_confirmation"]["case_ids"]
+    restored = adapter.export_tasks(
+        repo, [pr], tmp_path / "restored", limit=1, evaluator=backend, cache_dir=cache
+    )
+    assert restored["cache_hits"]["accepted"] == 1
+    assert len(backend.batches) == 2
+    assert (
+        json.loads(validation_evidence_path(restored["exported"][0]).read_text())[
+            "compiler_crash_confirmation"
+        ]
+        == evidence["compiler_crash_confirmation"]
+    )
+
+
 def test_export_cache_reuses_acceptance_and_both_rejection_stages(upstream, tmp_path):
     repo, _, pr = upstream
     prs = [
