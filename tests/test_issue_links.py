@@ -1,5 +1,6 @@
 import copy
 import json
+import subprocess
 
 import pytest
 
@@ -56,6 +57,64 @@ def issue(number, body="A reproduction."):
         "body": body,
         "url": f"https://github.com/nim-lang/Nim/issues/{number}",
     }
+
+
+def test_pr_prose_mentions_are_linked_issues_even_without_closing_keyword(monkeypatch):
+    pr = {
+        "number": 99,
+        "title": "Fix #41 #42",
+        "body": "Also addresses the behavior in #43; follow-up to #44.\n> Related #45\n`#46`\n```nim\n#47\n```",
+        "comments": {"nodes": [{"body": "Unrelated discussion: #48"}]},
+        "closingIssuesReferences": {"nodes": [issue(41)]},
+    }
+
+    def api(query, **kwargs):
+        assert "number: 42" in query and "number: 43" in query
+        assert all(f"number: {n}" not in query for n in (45, 46, 47, 48))
+        return {
+            "issue_42": {"__typename": "Issue", **issue(42)},
+            "issue_43": {"__typename": "Issue", **issue(43)},
+            "issue_44": {"__typename": "PullRequest"},
+        }
+
+    monkeypatch.setattr(issue_links, "_graphql", api)
+    assert [
+        i["number"] for i in issue_links.resolve_issue_references(pr)["resolvedIssues"]
+    ] == [41, 42, 43]
+
+
+def test_prose_mentions_exclude_foreign_repositories_and_url_fragments():
+    assert issue_links.prose_references(
+        "refs #41; see other/repo#42 and https://github.com/other/repo/issues/43; "
+        "https://example.org/page#44; embeddedToken#45; refs nim-lang/Nim#46"
+    ) == [41, 46]
+
+
+def test_missing_reference_does_not_discard_verified_issues_in_same_query(monkeypatch):
+    response = {
+        "data": {
+            "repository": {
+                "issue_41": {"__typename": "Issue", **issue(41)},
+                "issue_42": None,
+            }
+        },
+        "errors": [{"type": "NOT_FOUND", "message": "No such issue"}],
+    }
+
+    def api(command):
+        raise subprocess.CalledProcessError(
+            1, command, output=json.dumps(response).encode()
+        )
+
+    monkeypatch.setattr(issue_links.subprocess, "check_output", api)
+    pr = {
+        "number": 99,
+        "title": "refs #41 and #42",
+        "body": "",
+        "comments": {"nodes": []},
+        "closingIssuesReferences": {"nodes": []},
+    }
+    assert issue_links.resolve_issue_references(pr)["resolvedIssues"] == [issue(41)]
 
 
 def test_old_metadata_fetches_missing_pr_text_without_mutating_snapshot(monkeypatch):

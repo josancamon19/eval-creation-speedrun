@@ -1,4 +1,4 @@
-"""Resolve explicit closing references to Nim issues, preserving GitHub metadata."""
+"""Resolve explicit Nim issue links in PR prose, preserving GitHub metadata."""
 
 import json
 import re
@@ -15,8 +15,8 @@ REFERENCE = re.compile(
 )
 
 
-def closing_references(text: str) -> list[int]:
-    """Read closing keywords in prose, excluding quoted or executable examples."""
+def _prose(text: str) -> str:
+    """Remove quoted/executable examples before interpreting issue links."""
     lines, fence = [], None
     for line in re.sub(r"<!--.*?-->", "", text, flags=re.S).splitlines():
         marker = re.match(r" {0,3}(`{3,}|~{3,})(.*)$", line)
@@ -36,7 +36,25 @@ def closing_references(text: str) -> list[int]:
             lines.append("")
         else:
             lines.append(re.sub(r"(`+).*?\1", "", line))
-    prose = "\n".join(lines)
+    return "\n".join(lines)
+
+
+def prose_references(text: str) -> list[int]:
+    """Accept explicit issue links in author prose, including `refs #123`."""
+    prose = _prose(text)
+    numbers = set()
+    for reference in REFERENCE.finditer(prose):
+        if reference.start() and re.match(r"[\w/#]", prose[reference.start() - 1]):
+            continue
+        repository = reference["url_repo"] or reference["repo"] or REPOSITORY
+        if repository.casefold() == REPOSITORY.casefold():
+            numbers.add(int(reference["url_number"] or reference["number"]))
+    return sorted(numbers)
+
+
+def closing_references(text: str) -> list[int]:
+    """Read closing keywords in prose, excluding quoted or executable examples."""
+    prose = _prose(text)
     numbers = set()
     for keyword in KEYWORD.finditer(prose):
         reference = REFERENCE.match(prose, keyword.end())
@@ -59,8 +77,19 @@ def _graphql(query: str, **variables) -> dict:
     command = ["gh", "api", "graphql", "-f", f"query={query}"]
     for name, value in variables.items():
         command += ["-F" if isinstance(value, int) else "-f", f"{name}={value}"]
-    result = json.loads(subprocess.check_output(command))
-    if result.get("errors"):
+    try:
+        result = json.loads(subprocess.check_output(command))
+    except subprocess.CalledProcessError as error:
+        if not error.output:
+            raise
+        result = json.loads(error.output)
+        if not result.get("errors"):
+            raise
+    errors = result.get("errors", [])
+    if errors and (
+        any(e.get("type") != "NOT_FOUND" for e in errors)
+        or not (result.get("data") or {}).get("repository")
+    ):
         raise RuntimeError(f"GitHub issue lookup failed: {result['errors']}")
     return result["data"]["repository"]
 
@@ -154,6 +183,8 @@ def resolve_issue_references(pr: dict) -> dict:
     comments = complete_comments(pr)
     commits = complete_commits(pr)
     numbers = set()
+    for text in (pr.get("title", ""), pr.get("body", "")):
+        numbers.update(prose_references(text or ""))
     for text in (
         pr.get("title", ""),
         pr.get("body", ""),
