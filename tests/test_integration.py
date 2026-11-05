@@ -49,6 +49,89 @@ def collect(repo, head, paths):
     )
 
 
+def test_compile_only_cases_preserve_options_and_have_distinct_identity(repository):
+    path = "tests/public/tcompile.nim"
+    repo, before = repository({path: 'discard """action: run"""\ndoAssert true\n'})
+    repo, head = repository(
+        {
+            path: 'discard """\naction: compile\ncmd: "nim c $options $file"\nmatrix: "--mm:arc; --mm:orc"\n"""\nstatic: doAssert true\n'
+        }
+    )
+    result = collect(repo, head, [path])
+    assert not result["rejected"]
+    assert len(result["cases"]) == 2
+    assert all(c["action"] == "compile" for c in result["cases"])
+    assert [c["options"] for c in result["cases"]] == [["--mm:arc"], ["--mm:orc"]]
+    assert result["fixtures"] == [path]
+    # Action itself is part of case identity, even with identical flags.
+    repo, changed = repository({path: 'discard """action: compile"""\ndoAssert true\n'})
+    assert (
+        collect(repo, changed, [path])["cases"][0]["id"]
+        != collect(repo, before, [path])["cases"][0]["id"]
+    )
+
+
+@pytest.mark.parametrize(
+    "directive",
+    [
+        'output: "ok"',
+        'input: ""',
+        "exitcode: 1",
+        'nimout: "hint"',
+        'ccodecheck: "generated"',
+        'cmd: "nim c -r $file"',
+    ],
+)
+def test_compile_only_does_not_silently_drop_other_expectations(repository, directive):
+    path = "tests/public/tcompile.nim"
+    repo, head = repository(
+        {path: 'discard """\naction: compile\n' + directive + '\n"""\ndiscard\n'}
+    )
+    result = collect(repo, head, [path])
+    assert not result["cases"]
+    assert path in result["rejected"]
+
+
+def test_literal_config_switches_are_preserved_without_executing_nimscript(repository):
+    path = "tests/public/tcfg.nim"
+    repo, head = repository(
+        {
+            path: 'discard """\nmatrix: "--deepcopy:on"\n"""\ndoAssert true\n',
+            "tests/public/config.nims": 'switch("styleCheck", "usages")\nswitch("styleCheck", "error") # spelling\nswitch("define", "nimPreviewSlimSystem")\nswitch("warningAsError", "ProveInit")\n',
+        }
+    )
+    result = collect(repo, head, [path])
+    assert not result["rejected"]
+    assert result["cases"][0]["options"] == [
+        "--styleCheck:usages",
+        "--styleCheck:error",
+        "--define:nimPreviewSlimSystem",
+        "--warningAsError:ProveInit",
+        "--deepcopy:on",
+    ]
+    assert result["fixtures"] == [path]
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        'switch("define", "danger")',
+        'switch("path", "../../compiler")',
+        'switch("define", getEnv("CONFIG"))',
+        'when defined(windows):\n  switch("threads", "on")',
+        'switch("threads", "on"); exec("command")',
+    ],
+)
+def test_dynamic_or_unsupported_config_switches_remain_rejected(repository, config):
+    path = "tests/public/tcfg.nim"
+    repo, head = repository(
+        {path: "doAssert true\n", "tests/public/config.nims": config + "\n"}
+    )
+    result = collect(repo, head, [path])
+    assert not result["cases"]
+    assert "compiler config" in result["rejected"][path]
+
+
 @pytest.mark.parametrize(
     "declaration",
     [
@@ -342,7 +425,6 @@ def test_pointer_aggregate_and_opaque_casts_remain_rejected(repository, source):
 @pytest.mark.parametrize(
     "directive",
     [
-        "action: compile",
         "action: reject",
         'cmd: "nim check $file"',
         'nimout: "Hint: ok"',

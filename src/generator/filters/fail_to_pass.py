@@ -17,7 +17,7 @@ INCONCLUSIVE = {"timeout", "runtime_signal", "compiler_signal"}
 # Linux fault signals, independent of the host running the exporter. Resource
 # limits, SIGKILL and SIGTERM do not establish compiler defects.
 _COMPILER_FAULT_SIGNALS = {4, 6, 7, 8, 11}
-POLICY = "nim-blackbox-fail-to-pass-and-regressions-linux-amd64-c-v4"
+POLICY = "nim-blackbox-fail-to-pass-and-regressions-linux-amd64-c-v5"
 
 
 class EvaluationError(RuntimeError):
@@ -63,6 +63,9 @@ def _checks(report: dict, cases: list[dict], agent: str) -> dict[str, dict]:
     errors = []
     for case in cases:
         check = by_id[case["id"]]
+        action = case.get("action", "run")
+        if action not in {"compile", "run"} or check.get("action", "run") != action:
+            raise EvaluationError(f"{agent}: inconsistent action for {case['id']}")
         status = check.get("status")
         if status not in FAILURES | INCONCLUSIVE | {"passed", "infrastructure_error"}:
             raise EvaluationError(
@@ -76,7 +79,9 @@ def _checks(report: dict, cases: list[dict], agent: str) -> dict[str, dict]:
             check.get("compile_exit_code"),
             check.get("run_exit_code"),
         )
-        if status in {"passed", "wrong_output"}:
+        if status == "passed" and action == "compile":
+            valid = type(compile_code) is int and compile_code == 0 and run_code is None
+        elif status in {"passed", "wrong_output"}:
             valid = compile_code == 0 and run_code == case.get("expected_exit", 0)
         elif status == "compile_error":
             valid = (
@@ -113,6 +118,11 @@ def _checks(report: dict, cases: list[dict], agent: str) -> dict[str, dict]:
             errors.append(f"{case['id']} ({case['path']}): {error}")
         else:
             valid = True  # Runtime signals and timeouts never qualify.
+        if action == "compile" and (
+            run_code is not None
+            or status in {"wrong_exit", "wrong_output", "runtime_signal"}
+        ):
+            valid = False
         if not valid:
             raise EvaluationError(f"{agent}: inconsistent exit codes for {case['id']}")
     if inconclusive:

@@ -52,16 +52,17 @@ def test_base_suite_uses_all_direct_category_cases_and_audits_exclusions(history
     )
     assert [case["path"] for case in selected["cases"]] == [
         "tests/category/tchanged.nim",
+        "tests/category/tcompile.nim",
         "tests/category/tmatrix.nim",
         "tests/category/tmatrix.nim",
     ]
     assert selected["fixtures"] == [
         "tests/category/tchanged.nim",
+        "tests/category/tcompile.nim",
         "tests/category/tmatrix.nim",
         "tests/shared/helper.nim",
     ]
     assert set(selected["rejected"]) == {
-        "tests/category/tcompile.nim",
         "tests/category/twindows.nim",
     }
     audit = selected["selection"]

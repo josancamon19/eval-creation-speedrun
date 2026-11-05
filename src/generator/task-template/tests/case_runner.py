@@ -201,6 +201,9 @@ _OPTIONS = {
     "strings": {"default", "sso"},
     "threads": {"on", "off"},
     "sinkinference": {"on", "off"},
+    "deepcopy": {"on", "off"},
+    "stylecheck": {"off", "hint", "error", "usages"},
+    "warningaserror": {"proveinit", "uninit"},
     "exceptions": {"setjmp", "goto", "quirky"},
     "experimental": _EXPERIMENTAL,
 }
@@ -377,7 +380,7 @@ def run_cases(
     timeout: float = 180,
     work_dir: Path | None = None,
 ) -> list[dict]:
-    """Compile then execute each explicitly listed backend/memory-manager case."""
+    """Compile each case; execute only cases whose contract requires a run."""
     compiler = Path(compiler).absolute()
     fixture_root = Path(fixture_root).absolute()
     log_dir = Path(log_dir).absolute()
@@ -394,7 +397,7 @@ def run_cases(
             "path": case.get("path"),
             **{
                 name: case[name]
-                for name in ("suite", "role", "source_commit")
+                for name in ("suite", "role", "source_commit", "action")
                 if name in case
             },
             "status": "infrastructure_error",
@@ -414,6 +417,19 @@ def run_cases(
                 raise ValueError("no host C compiler is installed")
             if case.get("target", "c") != "c":
                 raise ValueError("only the native C target is supported")
+            action = case.get("action", "run")
+            if action not in {"compile", "run"}:
+                raise ValueError("case action must be compile or run")
+            if action == "compile" and (
+                case.get("expected_output") is not None
+                or case.get("stdin", "") != ""
+                or case.get("expected_exit", 0) != 0
+                or case.get("sort_output", False)
+                or case.get("output_mode", "exact") != "exact"
+            ):
+                raise ValueError(
+                    "compile-only cases cannot contain runtime expectations"
+                )
             case_root = fixture_root
             if "suite" in case:
                 if case["suite"] not in {"base", "pr"}:
@@ -485,6 +501,9 @@ def run_cases(
                 or not os.access(binary, os.X_OK)
             ):
                 raise ValueError("compiler succeeded without producing an executable")
+            if action == "compile":
+                result.update(status="passed", passed=True)
+                continue
             # The runtime oracle observes executable behavior. Generated C,
             # build JSON and intermediate objects are implementation details.
             for artifact in output_dir.iterdir():

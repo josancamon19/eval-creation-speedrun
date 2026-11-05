@@ -78,6 +78,43 @@ def test_compiles_and_runs_as_distinct_subprocesses(binary_fixture):
     assert result["path"] == "tests/case.nim"
 
 
+def test_compile_only_observes_compiler_without_executing_program(binary_fixture):
+    execute, _, _ = binary_fixture
+    result = execute(
+        'raise RuntimeError("must never execute")',
+        case={"action": "compile", "expected_output": None},
+    )
+    assert result["status"] == "passed"
+    assert result["action"] == "compile"
+    assert result["compile_exit_code"] == 0
+    assert result["run_exit_code"] is None
+    assert "run_command" not in result
+
+
+def test_compile_only_rejects_missing_executable(binary_fixture):
+    execute, _, _ = binary_fixture
+    result = execute(
+        source={"no_binary": True}, case={"action": "compile", "expected_output": None}
+    )
+    assert result["status"] == "infrastructure_error"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        {"action": "compile", "expected_output": "ignored"},
+        {"action": "compile", "expected_output": None, "expected_exit": 1},
+        {"action": "compile", "expected_output": None, "stdin": "input"},
+        {"action": "unknown"},
+    ],
+)
+def test_invalid_action_contract_is_rejected_before_execution(binary_fixture, case):
+    execute, _, _ = binary_fixture
+    result = execute(case=case)
+    assert result["status"] == "infrastructure_error"
+    assert result["compile_exit_code"] is None
+
+
 def test_base_and_pr_fixtures_keep_independent_contents(binary_fixture, tmp_path):
     _, compiler, root = binary_fixture
     cases = []
@@ -137,6 +174,11 @@ def test_compilation_explicitly_targets_linux_amd64_c(binary_fixture):
         "--experimental:templateOpenSym",
         "--sinkInference:on",
         "--sinkInference:off",
+        "--styleCheck:usages",
+        "--styleCheck:error",
+        "--warningAsError:ProveInit",
+        "--warningAsError:Uninit",
+        "--deepcopy:on",
     ],
 )
 def test_semantic_option_reaches_the_compiler_unchanged(binary_fixture, option):

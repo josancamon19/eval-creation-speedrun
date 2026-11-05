@@ -62,6 +62,24 @@ def candidate(tmp_path):
     return tmp_path, cases
 
 
+def test_compile_only_requires_successful_compilation_without_runtime(candidate):
+    task, cases = candidate
+    cases[0]["action"] = "compile"
+    (task / "tests/verify.py").write_text(f"CASES = {cases!r}\n")
+    reports = {
+        "nop": report(cases, ["compile_error", "passed", "passed", "passed"]),
+        "oracle": report(cases, ["passed"] * 4),
+    }
+    for data in reports.values():
+        data["checks"][0].update(action="compile", run_exit_code=None)
+    result = validate_fail_to_pass(task, lambda path, agent: reports[agent])
+    assert result["cases"][0]["role"] == "fail_to_pass"
+    assert result["cases"][0]["action"] == "compile"
+    reports["oracle"]["checks"][0]["run_exit_code"] = 0
+    with pytest.raises(EvaluationError, match="exit codes"):
+        validate_fail_to_pass(task, lambda path, agent: reports[agent])
+
+
 @pytest.mark.parametrize(
     "environment",
     [

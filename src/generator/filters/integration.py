@@ -151,6 +151,9 @@ _OPTIONS = {
     "strings": {"default", "sso"},
     "threads": {"on", "off"},
     "sinkinference": {"on", "off"},
+    "deepcopy": {"on", "off"},
+    "stylecheck": {"off", "hint", "error", "usages"},
+    "warningaserror": {"proveinit", "uninit"},
     "exceptions": {"setjmp", "goto", "quirky"},
     "experimental": _EXPERIMENTAL,
 }
@@ -197,7 +200,9 @@ def _options(value: str) -> list[list[str]]:
     return configs
 
 
-def _command_options(command: str, matrix: str, explicit_run: bool) -> list[list[str]]:
+def _command_options(
+    command: str, matrix: str, explicit_run: bool, *, compile_only: bool = False
+) -> list[list[str]]:
     """Translate a bounded Nim C command into options, never executable text."""
     try:
         arguments = shlex.split(command)
@@ -211,7 +216,9 @@ def _command_options(command: str, matrix: str, explicit_run: bool) -> list[list
         or arguments.count("-r") > 1
     ):
         raise _Rejected("unsupported compiler command; expected nim c [options] $file")
-    if not explicit_run and "-r" not in arguments:
+    if compile_only and "-r" in arguments:
+        raise _Rejected("compile-only tests cannot request execution with -r")
+    if not compile_only and not explicit_run and "-r" not in arguments:
         raise _Rejected("compiler command requires an explicit run test")
     if matrix.strip() and "$options" not in arguments:
         raise _Rejected("compiler command does not apply its matrix options")
@@ -319,8 +326,10 @@ def _spec(text: str) -> dict:
             if flag not in _OTHER_PLATFORMS and flag not in _BOOL:
                 raise _Rejected(f"unsupported disabled condition: {value}")
         elif key == "action":
-            if _normal(value) != "run":
-                raise _Rejected(f"only executable run tests are supported: {value}")
+            if _normal(value) not in {"run", "compile"}:
+                raise _Rejected(
+                    f"only run and positive compile tests are supported: {value}"
+                )
         elif key in {"targets", "target"}:
             targets = _normal(value).split()
             if (
@@ -348,6 +357,12 @@ def _spec(text: str) -> dict:
         raise _Rejected("diagnostic file expectations require an explicit run test")
     if "output" in values and "outputsub" in values:
         raise _Rejected("ambiguous output and outputsub directives")
+    compile_only = _normal(values.get("action", "")) == "compile"
+    if compile_only and (
+        {"output", "outputsub", "input", "sortoutput"}.intersection(values)
+        or int(values.get("exitcode", "0")) != 0
+    ):
+        raise _Rejected("compile-only tests cannot contain runtime expectations")
     matrix = values.get("matrix", "")
     configurations = (
         _command_options(
@@ -355,11 +370,13 @@ def _spec(text: str) -> dict:
             matrix,
             _normal(values.get("action", "")) == "run"
             or bool({"output", "outputsub"}.intersection(values)),
+            compile_only=compile_only,
         )
         if "cmd" in values
         else _options(matrix)
     )
     return {
+        **({"action": "compile"} if compile_only else {}),
         "configurations": configurations,
         "expected_output": values.get("outputsub", "").strip()
         if "outputsub" in values
@@ -831,13 +848,26 @@ class _Repository:
         conflicts = sorted(candidates & self.files.keys())
         if not conflicts:
             return []
-        if len(conflicts) != 1 or not conflicts[0].endswith(".cfg"):
+        if len(conflicts) != 1:
             raise _Rejected(f"unsupported compiler config: {conflicts[0]}")
         # Translate one plain option file, preserving command-line precedence.
-        # NimScript, conditionals, includes, and layered configs remain unsupported.
+        # Literal switch calls are data; never execute arbitrary NimScript.
         options = []
         try:
             for line in self.source(conflicts[0]).splitlines():
+                if conflicts[0].endswith(".nims"):
+                    if not line.strip() or line.lstrip().startswith("#"):
+                        continue
+                    match = re.fullmatch(
+                        r'\s*switch\("([A-Za-z]+)",\s*"([A-Za-z0-9_]+)"\)\s*(?:#.*)?',
+                        line,
+                    )
+                    if not match:
+                        raise _Rejected("expected a literal switch call")
+                    words = [f"--{match[1]}:{match[2]}"]
+                    _validate_options(words)
+                    options.extend(words)
+                    continue
                 words = shlex.split(line, comments=True)
                 if not words:
                     continue
@@ -900,7 +930,7 @@ class _Repository:
 
 
 def collect_cases(repo: Path, head: str, paths: list[str]) -> dict:
-    """Expand eligible test paths into independently verifiable C run cases."""
+    """Expand eligible paths into independent C compile or compile-and-run cases."""
     repository = _Repository(repo, head)
     cases, fixtures, rejected = [], set(), {}
     for path in dict.fromkeys(paths):
@@ -915,8 +945,11 @@ def collect_cases(repo: Path, head: str, paths: list[str]) -> dict:
             closure = set()
             spec = repository.inspect(path, closure)
             for options in spec["configurations"]:
+                identity_parts = [path, ENVIRONMENT, options]
+                if spec.get("action") == "compile":
+                    identity_parts.append("compile")
                 identity = json.dumps(
-                    [path, ENVIRONMENT, options], sort_keys=True, separators=(",", ":")
+                    identity_parts, sort_keys=True, separators=(",", ":")
                 )
                 cases.append(
                     {

@@ -15,6 +15,7 @@ environment:
 agents:
   - name: mini-swe-agent
     model_name: fireworks_ai/accounts/fireworks/models/deepseek-v4p1-flash-1017
+    override_timeout_sec: 7200
     kwargs:
       version: "2.4.6"
       skip_install: true
