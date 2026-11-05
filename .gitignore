@@ -1,0 +1,28 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.env
+.env.*
+.envs/
+.DS_Store
+
+# Upstream repositories for benchmark research
+/repos/
+
+# Regenerable task source archives and evaluation artifacts
+/.cache/
+/jobs/
+/datasets/**/environment/source.tar.gz
+/datasets/**/environment/dependencies.tar.gz
+/.pytest_cache/
+/.ruff_cache/
+/.superpowers/
+datasets/
+docs/
