@@ -18,7 +18,7 @@ wheels/
 
 # Regenerable task source archives and evaluation artifacts
 /.cache/
-/jobs/
+/jobs
 /datasets/**/environment/source.tar.gz
 /datasets/**/environment/dependencies.tar.gz
 /.pytest_cache/

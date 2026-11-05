@@ -2,7 +2,6 @@
 name = "generator"
 version = "0.1.0"
 description = "Reproducible Nim regression tasks for Harbor and mini-swe-agent"
-readme = "README.md"
 authors = [
     { name = "Joan Cabezas", email = "joan.santiago.cabezas@gmail.com" }
 ]
