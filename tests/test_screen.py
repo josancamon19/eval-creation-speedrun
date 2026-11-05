@@ -28,6 +28,11 @@ def checks(**outcomes):
     }
 
 
+def test_screening_honors_requested_review_concurrency(backend):
+    run = screen.ScreeningRun(prs(1), review_concurrency=48)
+    assert run.review_concurrency == 48
+
+
 @pytest.fixture
 def backend(tmp_path, monkeypatch):
     monkeypatch.setattr(screen, "ROOT", tmp_path)

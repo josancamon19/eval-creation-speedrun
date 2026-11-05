@@ -341,7 +341,7 @@ def main(argv: list[str] | None = None) -> int:
         "--concurrency",
         type=int,
         default=16,
-        help="Maximum concurrent Daytona reviews (1–16)",
+        help="Maximum concurrent Daytona reviews (positive integer)",
     )
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument(
@@ -354,8 +354,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.model in {"sonnet-5.5", "sonnet-5-5", "claude-sonnet-5-5"}:
         args.model = DEFAULT_MODEL
     try:
-        if not 1 <= args.concurrency <= 16:
-            raise ValueError("--concurrency must be between 1 and 16")
+        if args.concurrency < 1:
+            raise ValueError("--concurrency must be positive")
         if args.timeout <= 0:
             raise ValueError("--timeout must be positive")
         tasks = select_tasks(args)

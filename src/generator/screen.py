@@ -173,7 +173,7 @@ class ScreeningRun:
         self.output = ROOT / "datasets/nim"
         self.config = config or ROOT / "src/generator/configs/job.yaml"
         self.batch_size, self.concurrency = batch_size, concurrency
-        self.review_concurrency = min(review_concurrency, 16)
+        self.review_concurrency = review_concurrency
         cache_root = (cache_root or ROOT / ".cache/screening").resolve()
         cache_root.relative_to((ROOT / ".cache").resolve())
         inputs = {

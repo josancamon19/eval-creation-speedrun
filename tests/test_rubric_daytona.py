@@ -56,8 +56,9 @@ def test_cloud_wrapper_preserves_evidence_and_detects_changes(tasks, tmp_path):
     assert (task / "instruction.md").read_text() == "Fix the issue in /workspace/41.md."
 
 
-def test_cloud_batch_caps_concurrency_and_keeps_only_markdown(
-    tasks, tmp_path, monkeypatch
+@pytest.mark.parametrize("concurrency", [16, 48])
+def test_cloud_batch_honors_concurrency_and_keeps_only_markdown(
+    tasks, tmp_path, monkeypatch, concurrency
 ):
     assert hasattr(rubric, "Job")
     staged = []
@@ -96,7 +97,7 @@ def test_cloud_batch_caps_concurrency_and_keeps_only_markdown(
     async def create(config):
         assert config.environment.type.value == "daytona"
         assert config.environment.delete is True
-        assert config.n_concurrent_trials == 16
+        assert config.n_concurrent_trials == concurrency
         assert config.n_attempts == 1 and config.retry.max_retries == 0
         assert config.agents[0].model_name == "anthropic/claude-sonnet-5-5"
         assert config.agents[0].env["CLAUDE_CODE_OAUTH_TOKEN"] == "claude-secret"
@@ -106,7 +107,19 @@ def test_cloud_batch_caps_concurrency_and_keeps_only_markdown(
 
     monkeypatch.setattr(rubric.Job, "create", create)
     output = tmp_path / "reports"
-    assert rubric.main([str(tasks), "--output", str(output), "--fail-on-findings"]) == 1
+    assert (
+        rubric.main(
+            [
+                str(tasks),
+                "--output",
+                str(output),
+                "--fail-on-findings",
+                "--concurrency",
+                str(concurrency),
+            ]
+        )
+        == 1
+    )
     assert len(list(output.rglob("*.*"))) == 2
     first = (output / "nim-pr-1/rubric.md").read_text()
     assert "failed" in first and "warnings" in first
@@ -114,7 +127,7 @@ def test_cloud_batch_caps_concurrency_and_keeps_only_markdown(
     assert all(not path.exists() for path in staged)
 
 
-@pytest.mark.parametrize("value", ["0", "17", "-1"])
+@pytest.mark.parametrize("value", ["0", "-1"])
 def test_invalid_cloud_concurrency_is_rejected_before_launch(tasks, tmp_path, value):
     assert (
         rubric.main(
