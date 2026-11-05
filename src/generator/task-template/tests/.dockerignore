@@ -8,7 +8,5 @@
 !case_runner.py
 !ctrf.py
 !scoring.py
-!platform.json
-!manifest.json
 !fixtures/
 !fixtures/**

@@ -16,13 +16,11 @@ def _digest(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def _files(root: Path, *, template: bool = False) -> dict:
+def _files(root: Path) -> dict:
     result = {}
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root)
         if "__pycache__" in relative.parts:
-            continue
-        if template and path.name in {"adapter.py", "README.md"}:
             continue
         if path.is_symlink():
             raise ValueError(f"symlink in cached task: {relative}")
@@ -34,14 +32,14 @@ def _files(root: Path, *, template: bool = False) -> dict:
 class ExportCache:
     def __init__(self, root: Path, repo: Path, template: Path, environment: str):
         self.root = root.resolve()
-        package = Path(__file__).parent
+        package = Path(__file__).parents[1]
         inputs = {
             "schema": 1,
             "repository": str(repo.resolve()),
             "policy": fail_to_pass.POLICY,
             "environment": ENVIRONMENT,
             "backend": environment,
-            "template": _files(template, template=True),
+            "template": _files(template),
             "code": {
                 name: _digest(package / name)
                 for name in (
@@ -49,7 +47,9 @@ class ExportCache:
                     "filters/__init__.py",
                     "filters/integration.py",
                     "filters/fail_to_pass.py",
-                    "export_cache.py",
+                    "utils/__init__.py",
+                    "utils/export_cache.py",
+                    "utils/task_data.py",
                 )
             },
             "dependencies": {
@@ -77,7 +77,11 @@ class ExportCache:
             elif entry["status"] == "accepted":
                 task = (self.root / entry["artifact"]).resolve()
                 task.relative_to(self.root / "tasks")
-                if entry["files"] and _files(task) == entry["files"]:
+                if (
+                    entry["files"]
+                    and _files(task) == entry["files"]
+                    and entry["validation"]["sha256"] == fail_to_pass.task_hashes(task)
+                ):
                     return entry
         except OSError, ValueError, KeyError, TypeError:
             pass  # A damaged or incomplete entry is a miss, never evidence.
@@ -112,6 +116,7 @@ class ExportCache:
         )
 
     def accept(self, key: str, pr: dict, task: Path) -> None:
+        evidence = json.loads(fail_to_pass.validation_evidence_path(task).read_text())
         directory = self.root / "tasks"
         directory.mkdir(parents=True, exist_ok=True)
         bundle = Path(tempfile.mkdtemp(prefix=f"{key}-", dir=directory))
@@ -125,6 +130,7 @@ class ExportCache:
                 stage="calibration",
                 artifact=str(artifact.relative_to(self.root)),
                 files=_files(artifact),
+                validation=evidence,
             )
         except BaseException:
             shutil.rmtree(bundle)
@@ -133,6 +139,7 @@ class ExportCache:
     def restore(self, entry: dict, destination: Path) -> None:
         if destination.exists():
             if _files(destination) == entry["files"]:
+                fail_to_pass.save_validation_evidence(destination, entry["validation"])
                 return
             raise FileExistsError(
                 f"{destination} differs from the cached task; use a new output directory"
@@ -146,3 +153,4 @@ class ExportCache:
             if destination.exists():
                 raise FileExistsError(f"{destination} was created during cache restore")
             staged.rename(destination)
+        fail_to_pass.save_validation_evidence(destination, entry["validation"])

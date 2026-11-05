@@ -12,30 +12,25 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
-from generator.export_cache import ExportCache
 from generator.filters.fail_to_pass import (
     HarborEvaluator,
-    task_hashes,
+    save_validation_evidence,
     validate_fail_to_pass,
 )
-from generator.filters.integration import ENVIRONMENT, collect_cases
+from generator.filters.integration import collect_cases
+from generator.utils.export_cache import ExportCache
+from generator.utils.task_data import write_cases
 
 TEMPLATE = Path(__file__).parent / "task-template"
 REPOSITORY_URL = "https://github.com/nim-lang/Nim.git"
-# This PR fixes an additional bug which the linked issue does not describe.
-EXCLUDED_TESTS = {
-    26602: {
-        "tests/effects/tforbids_every.nim": "Tests a separate .forbids list-order bug absent from the linked issue."
-    }
-}
 
 
 def issue_markdown(body: str) -> str:
-    """Drop version metadata and the description label, preserving code examples."""
-    lines = []
+    """Strip empty responses and metadata while preserving real text and examples."""
+    lines = body.splitlines(keepends=True)
+    headings = []
     fence = None
-    version_section = False
-    for line in body.splitlines(keepends=True):
+    for index, line in enumerate(lines):
         text = line.rstrip("\r\n")
         marker = re.match(r" {0,3}(`{3,}|~{3,})(.*)$", text)
         if fence is not None:
@@ -51,15 +46,21 @@ def issue_markdown(body: str) -> str:
         elif heading := re.match(r" {0,3}(#{1,6})(?:[ \t]+(.*)|$)", text):
             level = len(heading[1])
             title = re.sub(r"[ \t]+#+[ \t]*$", "", heading[2] or "").strip().casefold()
-            if level <= 3:
-                version_section = False
-            if level == 3 and title == "nim version":
-                version_section = True
-            elif level == 3 and title == "description":
-                continue
-        if not version_section:
-            lines.append(line)
-    return "".join(lines)
+            headings.append((index, level, title))
+    removed = set()
+    for position, (start, level, title) in enumerate(headings):
+        end = next(
+            (index for index, depth, _ in headings[position + 1 :] if depth <= level),
+            len(lines),
+        )
+        content = "".join(lines[start + 1 : end]).strip()
+        if (level == 3 and title == "nim version") or content == "_No response_":
+            removed.update(range(start, end))
+        elif level == 3 and title == "description":
+            removed.add(start)
+    return "".join(
+        line for index, line in enumerate(lines) if index not in removed
+    ).strip()
 
 
 def git(repo: Path, *args: str) -> bytes:
@@ -177,7 +178,6 @@ def inspect_pr(repo: Path, pr: dict) -> dict:
         and Path(p).name.startswith("t")
         and p.endswith(".nim")
         and additions.get(p, "0") not in ("0", "-")
-        and p not in EXCLUDED_TESTS.get(pr["number"], {})
     ]
     implementation = [
         p for _, p in changed if not p.startswith(("tests/", "testament/"))
@@ -198,21 +198,6 @@ def inspect_pr(repo: Path, pr: dict) -> dict:
         implementation=implementation,
         changed=changed,
     )
-
-
-def select_candidates(
-    repo: Path, prs: list[dict], limit: int = 3
-) -> tuple[list[dict], list[dict]]:
-    selected, rejected = [], []
-    for pr in sorted(prs, key=lambda p: p["mergedAt"], reverse=True):
-        try:
-            inspect_pr(repo, pr)
-        except ValueError as e:
-            rejected.append({"number": pr["number"], "reason": str(e)})
-        else:
-            if len(selected) < limit:
-                selected.append(pr)
-    return selected, rejected
 
 
 def export_task(
@@ -254,15 +239,9 @@ def _publish_task(
     )
     for path in set(selection["fixtures"]) - set(retained["fixtures"]):
         (staged / "tests/fixtures" / path).unlink()
-    (staged / "tests/manifest.json").write_text(
-        json.dumps({"environment": ENVIRONMENT, "cases": evidence["cases"]}, indent=2)
-        + "\n"
-    )
+    write_cases(staged, evidence["cases"])
     evidence["static_rejections"] = selection["rejected"]
-    evidence["sha256"] = task_hashes(staged)
-    (staged / "tests/calibration.json").write_text(
-        json.dumps(evidence, indent=2) + "\n"
-    )
+    save_validation_evidence(staged, evidence)
     if task.exists():
         raise FileExistsError(f"{task} was created during calibration")
     staged.rename(task)
@@ -390,11 +369,7 @@ def export_tasks(
 
 
 def _stage_task(repo: Path, pr: dict, info: dict, selection: dict, task: Path) -> None:
-    shutil.copytree(
-        TEMPLATE,
-        task,
-        ignore=shutil.ignore_patterns("adapter.py", "README.md", "__pycache__"),
-    )
+    shutil.copytree(TEMPLATE, task, ignore=shutil.ignore_patterns("__pycache__"))
     issue = pr["closingIssuesReferences"]["nodes"][0]
     issue_id = str(issue["number"])
     instruction = (
@@ -439,8 +414,7 @@ def _stage_task(repo: Path, pr: dict, info: dict, selection: dict, task: Path) -
         dest = fixtures / name
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(git(repo, "show", f"{info['head']}:{name}"))
-    manifest = {"environment": ENVIRONMENT, "cases": selection["cases"]}
-    (task / "tests/manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    write_cases(task, selection["cases"])
 
 
 def discover(limit: int = 200) -> list[dict]:
@@ -467,12 +441,3 @@ def discover(limit: int = 200) -> list[dict]:
             break
         cursor = page["pageInfo"]["endCursor"]
     return sorted(prs[:limit], key=lambda p: p["mergedAt"], reverse=True)
-
-
-if __name__ == "__main__":
-    import sys
-
-    from generator.cli import main
-
-    sys.argv.insert(1, "export")
-    main()

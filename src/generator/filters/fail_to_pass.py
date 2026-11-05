@@ -10,6 +10,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from generator.filters.integration import ENVIRONMENT
+from generator.utils.task_data import task_spec
 
 FAILURES = {"compile_error", "wrong_exit", "wrong_output"}
 INCONCLUSIVE = {"timeout", "runtime_signal", "compiler_signal"}
@@ -72,7 +73,7 @@ def _checks(report: dict, cases: list[dict], agent: str) -> dict[str, dict]:
 
 def validate_fail_to_pass(task: Path, evaluate: Callable[[Path, str], dict]) -> dict:
     """Run both states with identical fixtures; retain only proven configurations."""
-    manifest = json.loads((task / "tests/manifest.json").read_text())
+    manifest = task_spec(task)
     if manifest.get("environment") != ENVIRONMENT:
         raise ValueError("task environment must be Linux amd64 with the C backend")
     cases = manifest["cases"]
@@ -118,10 +119,33 @@ def task_hashes(task: Path) -> dict[str, str]:
     return {
         str(path.relative_to(task)): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in sorted(task.rglob("*"))
-        if path.is_file()
-        and path != task / "tests/calibration.json"
-        and "__pycache__" not in path.parts
+        if path.is_file() and "__pycache__" not in path.parts
     }
+
+
+def validation_evidence_path(task: Path) -> Path:
+    digest = hashlib.sha256(
+        json.dumps(task_hashes(task), sort_keys=True).encode()
+    ).hexdigest()
+    return Path(".cache/validation") / task.name / f"{digest}.json"
+
+
+def save_validation_evidence(task: Path, evidence: dict) -> Path:
+    """Keep audit reports outside the task, keyed to its exported contents."""
+    evidence = {**evidence, "sha256": task_hashes(task)}
+    destination = validation_evidence_path(task)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", dir=destination.parent, delete=False
+    ) as stream:
+        temporary = Path(stream.name)
+        json.dump(evidence, stream, indent=2)
+        stream.write("\n")
+    try:
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
 
 
 class HarborEvaluator:

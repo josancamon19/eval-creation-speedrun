@@ -40,13 +40,10 @@ def candidate(tmp_path):
     cases = [
         {"id": str(i), "path": f"tests/t{i}.nim", "expected_exit": 0} for i in range(4)
     ]
-    (tmp_path / "tests/manifest.json").write_text(
-        json.dumps(
-            {
-                "environment": {"os": "linux", "cpu": "amd64", "backend": "c"},
-                "cases": cases,
-            }
-        )
+    (tmp_path / "tests/verify.py").write_text(f"CASES = {cases!r}\n")
+    (tmp_path / "tests/case_runner.py").write_text(
+        "_PLATFORM_POLICY = "
+        "{'environment': {'os': 'linux', 'cpu': 'amd64', 'backend': 'c'}}\n"
     )
     return tmp_path, cases
 
@@ -72,12 +69,10 @@ def test_unsupported_or_unattested_execution_cannot_qualify(candidate, environme
         validate_fail_to_pass(task, evaluate)
 
 
-def test_unsupported_manifest_is_rejected_before_running(candidate):
+def test_unsupported_task_environment_is_rejected_before_running(candidate):
     task, _ = candidate
-    path = task / "tests/manifest.json"
-    manifest = json.loads(path.read_text())
-    manifest["environment"]["cpu"] = "arm64"
-    path.write_text(json.dumps(manifest))
+    path = task / "tests/case_runner.py"
+    path.write_text(path.read_text().replace("amd64", "arm64"))
     calls = []
 
     def evaluate(path, agent):

@@ -1,1 +1,1 @@
-A new issue (`/workspace/{issue_id}.md`) was reported for `/workspace/Nim`. Fix it.
+Fix the issue (`/workspace/{issue_id}.md`) that was reported for `/workspace/Nim`.

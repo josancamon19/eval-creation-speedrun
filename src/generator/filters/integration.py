@@ -15,8 +15,10 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-_PLATFORM_POLICY = json.loads(
-    (Path(__file__).parents[1] / "task-template/tests/platform.json").read_text()
+from generator.utils.task_data import read_literal
+
+_PLATFORM_POLICY = read_literal(
+    Path(__file__).parents[1] / "task-template/tests/case_runner.py", "_PLATFORM_POLICY"
 )
 ENVIRONMENT = _PLATFORM_POLICY["environment"]
 _RESERVED_DEFINES = set(_PLATFORM_POLICY["reserved_defines"])

@@ -9,9 +9,11 @@ import tempfile
 import time
 from pathlib import Path
 
-from case_runner import ENVIRONMENT, execute_command, require_environment, run_cases
+from case_runner import execute_command, require_environment, run_cases
 from ctrf import write_ctrf
 from scoring import safe_extract
+
+CASES = []
 
 
 class InvalidSubmission(ValueError):
@@ -121,16 +123,13 @@ def main():
     prefix = ["/usr/sbin/runuser", "-u", "verifier", "--"]
     try:
         report["environment"] = require_environment()
-        manifest = json.loads(Path("/tests/manifest.json").read_text())
-        if manifest.get("environment") != ENVIRONMENT:
-            raise ValueError(
-                "manifest environment must be Linux amd64 with the C backend"
-            )
-        cases = manifest.get("cases")
-        if not isinstance(cases, list) or any(
-            not isinstance(case, dict) for case in cases
+        cases = CASES
+        if (
+            not isinstance(cases, list)
+            or not cases
+            or any(not isinstance(case, dict) for case in cases)
         ):
-            raise ValueError("manifest must contain a cases list")
+            raise ValueError("verifier must contain a nonempty cases list")
         # Restore trusted build inputs, then replace only compiler/library sources
         # with Harbor's artifacts. Agent configuration and binaries never transfer.
         with tarfile.open("/opt/source.tar.gz") as archive:

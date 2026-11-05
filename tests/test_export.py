@@ -7,12 +7,22 @@ from pathlib import Path
 import pytest
 
 from generator import adapter
-from generator.adapter import export_task, select_candidates
-from generator.filters.fail_to_pass import EvaluationError, HarborEvaluator
+from generator.adapter import export_task
+from generator.filters.fail_to_pass import (
+    EvaluationError,
+    HarborEvaluator,
+    validation_evidence_path,
+)
+from generator.utils.task_data import task_spec
+
+
+@pytest.fixture(autouse=True)
+def isolated_cache(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
 
 
 def evaluate_regression(task, agent):
-    cases = json.loads((task / "tests/manifest.json").read_text())["cases"]
+    cases = task_spec(task)["cases"]
     return {
         "environment": {"os": "linux", "cpu": "amd64", "backend": "c"},
         "status": "passed" if agent == "oracle" else "failed",
@@ -85,9 +95,9 @@ def upstream(tmp_path):
 def test_export_cleans_issue_and_separates_solution(upstream, tmp_path):
     repo, base, pr = upstream
     task = export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate_regression)
-    body = b"\r\n## Bug\r\n```nim\r\nold()\r\n```\r\n"
+    body = b"## Bug\r\n```nim\r\nold()\r\n```"
     assert (task / "instruction.md").read_text() == (
-        "A new issue (`/workspace/41.md`) was reported for `/workspace/Nim`. Fix it.\n"
+        "Fix the issue (`/workspace/41.md`) that was reported for `/workspace/Nim`.\n"
     )
     assert (task / "environment/41.md").read_bytes() == body
     assert not (task / "environment/{issue_id}.md").exists()
@@ -102,7 +112,7 @@ def test_export_cleans_issue_and_separates_solution(upstream, tmp_path):
     assert "compiler/main.nim" in patch
     assert "tests/stdlib/tnew.nim" not in patch
     assert (task / "tests/fixtures/tests/stdlib/tnew.nim").exists()
-    manifest = json.loads((task / "tests/manifest.json").read_text())
+    manifest = task_spec(task)
     assert manifest["environment"] == {"os": "linux", "cpu": "amd64", "backend": "c"}
     assert metadata["target_os"] == "linux"
     assert metadata["target_arch"] == "amd64"
@@ -120,10 +130,13 @@ def test_export_cleans_issue_and_separates_solution(upstream, tmp_path):
     assert (task / "tests/Dockerfile").is_file()
     assert not (task / "environment/submission.py").exists()
     assert [case["path"] for case in manifest["cases"]] == ["tests/stdlib/tnew.nim"]
-    evidence = json.loads((task / "tests/calibration.json").read_text())
+    for name in ("calibration.json", "manifest.json", "platform.json"):
+        assert not (task / "tests" / name).exists()
+        assert name not in (task / "tests/Dockerfile").read_text()
+    evidence = json.loads(validation_evidence_path(task).read_text())
     assert evidence["runs"]["nop"]["checks"][0]["passed"] is False
     assert evidence["runs"]["oracle"]["checks"][0]["passed"] is True
-    assert "tests/manifest.json" in evidence["sha256"]
+    assert "tests/verify.py" in evidence["sha256"]
     with tarfile.open(task / "environment/source.tar.gz") as archive:
         assert not any(".git" in Path(n).parts for n in archive.getnames())
         assert not any(n.endswith("tnew.nim") for n in archive.getnames())
@@ -143,13 +156,13 @@ def test_issue_cleanup_preserves_fenced_headings_and_following_sections():
     assert adapter.issue_markdown(body) == (
         "The reproduction is:\n"
         "````markdown\n### Nim Version\n```\n### Description\n````\n"
-        "### Expected Output\nKeep this result.\n"
+        "### Expected Output\nKeep this result."
     )
 
 
-def test_issue_cleanup_without_target_headings_is_unchanged():
+def test_issue_cleanup_without_target_headings_strips_only_edges():
     body = "\r\n## Bug\r\n    ### Nim version\r\nKeep all of this.\r\n"
-    assert adapter.issue_markdown(body) == body
+    assert adapter.issue_markdown(body) == body.strip()
 
 
 def test_issue_cleanup_removes_version_section_at_end():
@@ -157,8 +170,32 @@ def test_issue_cleanup_removes_version_section_at_end():
         adapter.issue_markdown(
             "### Description\nKeep the bug.\n### NIM VERSION\nNim 2.4.0\n"
         )
-        == "Keep the bug.\n"
+        == "Keep the bug."
     )
+
+
+def test_issue_cleanup_strips_edges_and_removes_unanswered_sections():
+    body = (
+        "\n\n### Description\nA real bug.\n\n"
+        "### Additional information\n\n_No response_\n\n"
+        "### Expected Output\nThe correct result.\n\n"
+        "### Actual Output\n_No response_\n\n"
+    )
+    assert adapter.issue_markdown(body) == (
+        "A real bug.\n\n### Expected Output\nThe correct result."
+    )
+
+
+def test_unanswered_description_is_empty_after_cleanup():
+    assert adapter.issue_markdown("### Description\n_No response_\n") == ""
+
+
+def test_issue_cleanup_preserves_placeholders_in_code_and_real_responses():
+    body = (
+        "### Reproduction\n```markdown\n### Example\n_No response_\n```\n\n"
+        "### Notes\nThe literal marker is:\n_No response_\n"
+    )
+    assert adapter.issue_markdown(body) == body.strip()
 
 
 def test_export_requires_issue_and_added_tests(upstream, tmp_path):
@@ -166,15 +203,6 @@ def test_export_requires_issue_and_added_tests(upstream, tmp_path):
     pr["closingIssuesReferences"]["nodes"] = []
     with pytest.raises(ValueError, match="one linked issue"):
         export_task(repo, pr, tmp_path / "tasks")
-
-
-def test_selection_uses_merge_time_and_records_exclusions(upstream):
-    repo, _, pr = upstream
-    newer = dict(pr, number=43, mergedAt="2026-11-02T00:00:00Z")
-    multiple = dict(pr, number=44, closingIssuesReferences={"nodes": [{}, {}]})
-    selected, rejected = select_candidates(repo, [pr, multiple, newer], limit=2)
-    assert [p["number"] for p in selected] == [43, 42]
-    assert rejected[0]["number"] == 44
 
 
 def test_rejects_changes_outside_submitted_source_directories(upstream, tmp_path):
@@ -268,7 +296,7 @@ def test_passing_baseline_fixture_is_removed_from_export(upstream, tmp_path):
         return observed
 
     task = export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate)
-    manifest = json.loads((task / "tests/manifest.json").read_text())
+    manifest = task_spec(task)
     assert [c["path"] for c in manifest["cases"]] == ["tests/stdlib/tnew.nim"]
     assert not (task / "tests/fixtures/tests/stdlib/tunrelated.nim").exists()
 
@@ -386,9 +414,12 @@ def test_export_cache_reuses_acceptance_and_both_rejection_stages(upstream, tmp_
     assert {r["stage"] for r in first["rejected"]} == {"static", "calibration"}
     assert first["calibrated"] == 2
     original = (first["exported"][0] / "instruction.md").read_text()
+    audit = validation_evidence_path(first["exported"][0])
+    evidence = json.loads(audit.read_text())
     (first["exported"][0] / "instruction.md").write_text("local edits")
     offline = RecordingBackend(unavailable=True)
     for _ in range(2):
+        audit.unlink()
         cached = adapter.export_tasks(
             repo,
             prs,
@@ -402,6 +433,7 @@ def test_export_cache_reuses_acceptance_and_both_rejection_stages(upstream, tmp_
         assert cached["cache_hits"] == {"accepted": 1, "rejected": 2}
         assert cached["calibrated"] == 0
         assert cached["scanned"] == 3
+        assert json.loads(audit.read_text()) == evidence
     assert offline.batches == []
 
 

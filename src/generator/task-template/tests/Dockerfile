@@ -21,7 +21,7 @@ RUN chmod 755 /usr/local/bin/build-nim \
 
 # Harbor restores only the declared source artifacts under /workspace/Nim.
 # Everything used to grade them belongs to this image.
-COPY test.sh verify.py case_runner.py ctrf.py scoring.py platform.json manifest.json /tests/
+COPY test.sh verify.py case_runner.py ctrf.py scoring.py /tests/
 COPY fixtures/ /tests/fixtures/
 
 WORKDIR /workspace/Nim
