@@ -149,6 +149,47 @@ def export_dependencies(repo: Path, base: str, destination: Path) -> None:
     destination.write_bytes(gzip.compress(output.getvalue(), mtime=0))
 
 
+def pr_date(pr: dict) -> str:
+    """Keep merge-time ordering, using activity time for unmerged candidates."""
+    return pr.get("mergedAt") or pr.get("updatedAt") or pr.get("createdAt") or ""
+
+
+def pr_commits(repo: Path, pr: dict) -> tuple[str, str]:
+    """Resolve an immutable baseline/reference pair without inventing a merge."""
+    merge = (pr.get("mergeCommit") or {}).get("oid")
+    if merge:
+        revisions = [merge]
+    else:
+        if (
+            pr.get("state") != "OPEN"
+            or pr.get("isDraft") is not False
+            or pr.get("mergedAt")
+        ):
+            raise ValueError("requires a merged PR or an explicitly non-draft open PR")
+        revisions = [pr.get("headRefOid"), pr.get("baseRefOid")]
+    pinned: list[str] = []
+    for revision in revisions:
+        if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise ValueError("PR revisions require a pinned 40-character commit ID")
+        pinned.append(revision)
+        present = subprocess.run(
+            ["git", "-C", str(repo), "cat-file", "-e", revision + "^{commit}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if present.returncode:
+            git(repo, "fetch", "--no-tags", "origin", revision)
+    head = pinned[0]
+    if merge:
+        base = git(repo, "rev-parse", head + "^1").decode().strip()
+    else:
+        bases = git(repo, "merge-base", "--all", *pinned).decode().splitlines()
+        if len(bases) != 1:
+            raise ValueError("open PR must have one unambiguous common ancestor")
+        base = bases[0]
+    return base, head
+
+
 def inspect_pr(repo: Path, pr: dict) -> dict:
     issues = pr.get("resolvedIssues", pr["closingIssuesReferences"]["nodes"])
     if not issues:
@@ -164,15 +205,7 @@ def inspect_pr(repo: Path, pr: dict) -> dict:
             )
     if pr["baseRefName"] != "devel":
         raise ValueError("only the devel branch is supported")
-    head = pr["mergeCommit"]["oid"]
-    present = subprocess.run(
-        ["git", "-C", str(repo), "cat-file", "-e", head + "^{commit}"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    if present.returncode:
-        git(repo, "fetch", "--no-tags", "origin", head)
-    base = git(repo, "rev-parse", head + "^1").decode().strip()
+    base, head = pr_commits(repo, pr)
     changed = changed_files(repo, base, head)
     stats = (
         git(repo, "diff", "--no-renames", "--numstat", base, head).decode().splitlines()
@@ -283,7 +316,7 @@ def export_tasks(
         if cache_dir is not None
         else None
     )
-    candidates = iter(sorted(prs, key=lambda p: p["mergedAt"], reverse=True))
+    candidates = iter(sorted(prs, key=pr_date, reverse=True))
     rejected: list[dict] = []
     result = {
         "exported": [],
@@ -478,6 +511,16 @@ def _stage_task(repo: Path, pr: dict, info: dict, selection: dict, task: Path) -
         .replace("@BASE_COMMIT@", info["base"])
         .replace("@MERGE_COMMIT@", info["head"])
     )
+    if not pr.get("mergeCommit"):
+        # A pinned PR head is a reference implementation, not a merged commit.
+        config.write_text(
+            config.read_text().replace(
+                f'merge_commit = "{info["head"]}"',
+                f'reference_commit = "{info["head"]}"\n'
+                'source_status = "open"\n'
+                f'base_ref_commit = "{pr["baseRefOid"]}"',
+            )
+        )
     archive = git(repo, "archive", "--format=tar", info["base"])
     (task / "environment/source.tar.gz").write_bytes(gzip.compress(archive, mtime=0))
     export_dependencies(repo, info["base"], task / "environment/dependencies.tar.gz")

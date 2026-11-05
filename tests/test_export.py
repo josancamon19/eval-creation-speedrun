@@ -341,6 +341,91 @@ def test_new_merge_is_fetched_from_origin(upstream, tmp_path):
     )
 
 
+def test_open_pr_uses_common_ancestor_and_records_unmerged_provenance(
+    upstream, tmp_path
+):
+    repo, base, pr = upstream
+    # The PR has multiple commits, while devel advanced independently.
+    (repo / "compiler/second.nim").write_text("second change\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "second PR commit")
+    head = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-qb", "devel", base)
+    (repo / "compiler/unrelated.nim").write_text("unrelated devel change\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "devel advances")
+    target = git(repo, "rev-parse", "HEAD")
+    pr.update(
+        state="OPEN",
+        isDraft=False,
+        mergedAt=None,
+        mergeCommit=None,
+        baseRefOid=target,
+        headRefOid=head,
+        updatedAt="2026-11-02T00:00:00Z",
+    )
+    task = export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate_regression)
+    metadata = tomllib.loads((task / "task.toml").read_text())["metadata"]
+    assert metadata["base_commit"] == base
+    assert metadata["reference_commit"] == head
+    assert metadata["base_ref_commit"] == target
+    assert metadata["source_status"] == "open"
+    assert "merge_commit" not in metadata
+    patch = (task / "solution/implementation.diff").read_text()
+    assert "compiler/main.nim" in patch and "compiler/second.nim" in patch
+    assert "compiler/unrelated.nim" not in patch
+    with tarfile.open(task / "environment/source.tar.gz") as archive:
+        assert "compiler/second.nim" not in archive.getnames()
+        assert "compiler/unrelated.nim" not in archive.getnames()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"state": "CLOSED"},
+        {"isDraft": True},
+        {"headRefOid": "HEAD"},
+        {"baseRefOid": None},
+        {"mergedAt": "2026-11-01T00:00:00Z"},
+    ],
+)
+def test_unmerged_pr_requires_explicit_open_state_and_pinned_revisions(
+    upstream, changes
+):
+    repo, base, pr = upstream
+    head = pr["mergeCommit"]["oid"]
+    pr.update(
+        state="OPEN",
+        isDraft=False,
+        mergedAt=None,
+        mergeCommit=None,
+        baseRefOid=base,
+        headRefOid=head,
+    )
+    pr.update(changes)
+    with pytest.raises(ValueError, match="open PR|commit ID"):
+        adapter.inspect_pr(repo, pr)
+
+
+def test_batch_supports_mixed_merged_and_open_pr_dates(upstream, tmp_path):
+    repo, base, pr = upstream
+    opened = dict(
+        pr,
+        number=43,
+        state="OPEN",
+        isDraft=False,
+        mergedAt=None,
+        mergeCommit=None,
+        baseRefOid=base,
+        headRefOid=pr["mergeCommit"]["oid"],
+        updatedAt="2026-11-02T00:00:00Z",
+    )
+    result = adapter.export_tasks(
+        repo, [pr, opened], tmp_path / "tasks", limit=2, evaluator=RecordingBackend()
+    )
+    assert [p.name for p in result["exported"]] == ["nim-pr-43", "nim-pr-42"]
+
+
 def test_default_export_calibrates_before_publishing(upstream, tmp_path, monkeypatch):
     repo, _, pr = upstream
     output = tmp_path / "tasks"

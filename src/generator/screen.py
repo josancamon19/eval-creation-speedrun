@@ -166,7 +166,7 @@ class ScreeningRun:
         excluded = set(exclude_numbers)
         self.prs = [
             pr
-            for pr in sorted(prs, key=lambda pr: pr["mergedAt"], reverse=True)
+            for pr in sorted(prs, key=adapter.pr_date, reverse=True)
             if pr["number"] not in excluded
         ][:limit]
         self.repo = repo or ROOT / "repos/Nim"
