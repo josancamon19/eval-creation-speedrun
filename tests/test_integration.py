@@ -242,6 +242,74 @@ def test_command_cannot_silently_change_ignored_matrix_options(repository):
 
 
 @pytest.mark.parametrize(
+    "feature", ["views", "codeReordering", "genericsOpenSym", "templateOpenSym"]
+)
+def test_known_literal_experimental_pragma_preserves_source_scope(repository, feature):
+    path = "tests/tfeature.nim"
+    source = f'{{.experimental: "{feature}".}}\ndoAssert true\n'
+    repo, head = repository({path: source})
+    result = collect(repo, head, [path])
+    assert result["rejected"] == {}
+    assert result["cases"][0]["options"] == []
+    assert result["fixtures"] == [path]
+    assert (repo / path).read_text() == source
+
+
+@pytest.mark.parametrize(
+    "pragma",
+    [
+        '{.experimental: "compiletimeFFI".}',
+        '{.experimental: "vmopsDanger".}',
+        '{.experimental: "unknownFeature".}',
+        "{.experimental: chosenFeature.}",
+        '{.experimental: "views", experimental: "compiletimeFFI".}',
+        '{.push experimental: "views".}',
+        '{.experimental: "views".}\n{.checks: off.}',
+    ],
+)
+def test_unsafe_or_opaque_experimental_pragmas_remain_rejected(repository, pragma):
+    path = "tests/tfeature.nim"
+    repo, head = repository({path: pragma + "\ndoAssert true\n"})
+    result = collect(repo, head, [path])
+    assert result["cases"] == []
+    assert path in result["rejected"]
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["cast[bool](false)", "cast[uint](int.high)", "cast[int8](cast[uint8](-12'i8))"],
+)
+def test_builtin_scalar_casts_preserve_public_language_tests(repository, expression):
+    path = "tests/tscalar.nim"
+    source = f"let value = {expression}\ndiscard value\n"
+    repo, head = repository({path: source})
+    result = collect(repo, head, [path])
+    assert result["rejected"] == {}
+    assert result["cases"][0]["path"] == path
+    assert (repo / path).read_text() == source
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "discard cast[ptr int](nil)",
+        "discard cast[pointer](1)",
+        "discard cast[Foo](value)",
+        "discard cast[type(value)](value)",
+        "discard cast[seq[byte]](value)",
+        "discard cast[proc()](value)",
+        "{.cast(gcsafe).}:\n  discard",
+    ],
+)
+def test_pointer_aggregate_and_opaque_casts_remain_rejected(repository, source):
+    path = "tests/tcast.nim"
+    repo, head = repository({path: source + "\n"})
+    result = collect(repo, head, [path])
+    assert result["cases"] == []
+    assert path in result["rejected"]
+
+
+@pytest.mark.parametrize(
     "directive",
     [
         "action: compile",
@@ -438,6 +506,7 @@ doAssert helper.answer() == 42
         "doAssert offsetOf(Foo, bar) == 8\n",
         '{.emit: "void test() {}".}\n',
         '{.compile: "fixture.c".}\n',
+        "var value {.liftLocals.} = 3\n",
         "proc puts(x: cstring) {.importc.}\n",
         'type X {.header: "x.h".} = object\n',
     ],

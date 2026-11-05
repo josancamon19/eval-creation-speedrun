@@ -130,11 +130,12 @@ def test_compilation_explicitly_targets_linux_amd64_c(binary_fixture):
     assert result["compile_command"][1] == "c"
 
 
-def test_legacy_runtime_option_reaches_the_compiler_unchanged(binary_fixture):
+@pytest.mark.parametrize("option", ["--newruntime", "--experimental:templateOpenSym"])
+def test_semantic_option_reaches_the_compiler_unchanged(binary_fixture, option):
     execute, _, _ = binary_fixture
-    result = execute(case={"options": ["--newruntime"]})
+    result = execute(case={"options": [option]})
     assert result["passed"]
-    assert "--newruntime" in result["compile_command"]
+    assert option in result["compile_command"]
 
 
 @pytest.mark.parametrize(

@@ -175,6 +175,7 @@ _EXPERIMENTAL = {
     "infergenerictypes",
     "opensym",
     "genericsopensym",
+    "templateopensym",
     "vtables",
     "typeboundops",
     "ownedrefs",

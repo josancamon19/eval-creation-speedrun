@@ -112,6 +112,7 @@ _EXPERIMENTAL = {
     "infergenerictypes",
     "opensym",
     "genericsopensym",
+    "templateopensym",
     "vtables",
     "typeboundops",
     "ownedrefs",
@@ -540,6 +541,7 @@ _FORBIDDEN_PRAGMAS = {
     "passc",
     "passl",
     "localpassc",
+    "liftlocals",
     "all",
     "asm",
     "noassert",
@@ -549,6 +551,55 @@ _FORBIDDEN_PRAGMAS = {
     "overflowchecks",
     "experimental",
 }
+
+
+def _literal_experimental_pragma(tokens: list[_Token], index: int) -> bool:
+    """Accept a standalone, known feature without moving its source-level scope."""
+    if index < 2 or index + 4 >= len(tokens):
+        return False
+    before, after = tokens[index - 2 : index], tokens[index + 1 : index + 5]
+    return (
+        [(t.kind, t.value) for t in before]
+        == [("punctuation", "{"), ("punctuation", ".")]
+        and after[0].kind == "punctuation"
+        and after[0].value == ":"
+        and after[1].kind == "string"
+        and _normal(after[1].value) in _EXPERIMENTAL
+        and [(t.kind, t.value) for t in after[2:]]
+        == [("punctuation", "."), ("punctuation", "}")]
+    )
+
+
+_SCALAR_CAST_TARGETS = {
+    "bool",
+    "char",
+    "int",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "float",
+    "float32",
+    "float64",
+}
+
+
+def _scalar_cast(tokens: list[_Token], index: int) -> bool:
+    if index + 4 >= len(tokens):
+        return False
+    opening, target, closing, call = tokens[index + 1 : index + 5]
+    return (
+        (opening.kind, opening.value) == ("punctuation", "[")
+        and target.kind == "identifier"
+        and _normal(target.value) in _SCALAR_CAST_TARGETS
+        and (closing.kind, closing.value) == ("punctuation", "]")
+        and (call.kind, call.value) == ("punctuation", "(")
+    )
 
 
 def _source(source: str) -> tuple[dict, list[_Token]]:
@@ -582,9 +633,19 @@ def _source(source: str) -> tuple[dict, list[_Token]]:
         if token.kind == "identifier":
             name = _normal(token.value)
             if (
-                name in _FORBIDDEN_IDENTIFIERS
+                (
+                    name in _FORBIDDEN_IDENTIFIERS
+                    and not (name == "cast" and _scalar_cast(tokens, index))
+                )
                 or name in _INSPECTION_IDENTIFIERS
-                or (pragma_depth and name in _FORBIDDEN_PRAGMAS)
+                or (
+                    pragma_depth
+                    and name in _FORBIDDEN_PRAGMAS
+                    and not (
+                        name == "experimental"
+                        and _literal_experimental_pragma(tokens, index)
+                    )
+                )
             ):
                 raise _Rejected(
                     f"unsupported implementation-dependent operation: {token.value}"
