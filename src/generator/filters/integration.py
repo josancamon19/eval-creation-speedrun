@@ -296,9 +296,17 @@ def _spec(text: str) -> dict:
         elif key == "exitcode":
             if not re.fullmatch(r"[0-9]+", value) or not 0 <= int(value) <= 255:
                 raise _Rejected(f"unsupported exit code: {value}")
-        elif key not in {"output", "outputsub", "input", "matrix"}:
+        elif key not in {"output", "outputsub", "input", "matrix", "file"}:
             raise _Rejected(f"unsupported spec directive: {key}")
         values[key] = value
+    # Historical Testament uses `file` only when comparing diagnostics.
+    # Explicit run tests compile their actual entrypoint and ignore this label.
+    if (
+        "file" in values
+        and _normal(values.get("action", "")) != "run"
+        and not {"output", "outputsub"}.intersection(values)
+    ):
+        raise _Rejected("diagnostic file expectations require an explicit run test")
     if "output" in values and "outputsub" in values:
         raise _Rejected("ambiguous output and outputsub directives")
     return {

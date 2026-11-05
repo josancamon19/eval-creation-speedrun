@@ -132,6 +132,42 @@ echo "ok"
     assert result["cases"][0]["output_mode"] == "contains"
 
 
+@pytest.mark.parametrize("run_directive", ['output: "OK"', "action: run"])
+def test_legacy_run_file_label_does_not_redirect_the_entrypoint(
+    repository, run_directive
+):
+    source = f'discard """\nfile: "different.nim"\n{run_directive}\n"""\necho "OK"\n'
+    path = "tests/openarray/tlegacy.nim"
+    repo, head = repository({path: source})
+    result = collect(repo, head, [path])
+    assert result["rejected"] == {}
+    assert len(result["cases"]) == 1
+    case = result["cases"][0]
+    assert case["path"] == path
+    assert case["expected_output"] == (
+        "OK" if run_directive.startswith("output") else None
+    )
+    assert result["fixtures"] == [path]
+    assert (repo / path).read_text() == source
+
+
+@pytest.mark.parametrize(
+    "directives",
+    [
+        'file: "system.nim"',
+        'file: "system.nim"\naction: compile',
+        'file: "system.nim"\naction: reject\nerrormsg: "bad"',
+        'file: "system.nim"\noutput: "OK"\nerrormsg: "bad"',
+    ],
+)
+def test_legacy_diagnostic_file_expectations_remain_rejected(repository, directives):
+    path = "tests/tdiagnostic.nim"
+    repo, head = repository({path: f'discard """\n{directives}\n"""\necho "OK"\n'})
+    result = collect(repo, head, [path])
+    assert result["cases"] == []
+    assert path in result["rejected"]
+
+
 @pytest.mark.parametrize(
     "directive",
     [
