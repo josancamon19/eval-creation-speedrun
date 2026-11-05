@@ -464,6 +464,32 @@ def test_multicommit_pr_rejects_mismatching_full_diff(upstream, monkeypatch):
         adapter.pr_commits(repo, pr)
 
 
+def test_rebased_diff_allows_context_drift_but_preserves_changed_indentation(
+    upstream, monkeypatch
+):
+    repo, base, pr = upstream
+    git(repo, "checkout", "-qb", "context-drift", base)
+    source = repo / "compiler/main.nim"
+    source.write_text("const unchanged = 1\nold\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "baseline context")
+    base = git(repo, "rev-parse", "HEAD")
+    source.write_text("const unchanged = 1\nfixed\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "squashed change")
+    head = git(repo, "rev-parse", "HEAD")
+    pr.update(mergeCommit={"oid": head}, commits={"totalCount": 2})
+    patch = adapter.git(repo, "diff", base, head)
+    upstream_patch = patch.replace(b" const unchanged = 1", b" const unchanged = 2")
+    assert upstream_patch != patch
+    monkeypatch.setattr(adapter, "upstream_pr_diff", lambda _: upstream_patch)
+    assert adapter.pr_commits(repo, pr) == (base, head)
+    # Nim indentation inside an actual change cannot be normalized away.
+    upstream_patch = upstream_patch.replace(b"+fixed", b"+  fixed")
+    with pytest.raises(ValueError, match="complete PR diff"):
+        adapter.pr_commits(repo, pr)
+
+
 def test_default_export_calibrates_before_publishing(upstream, tmp_path, monkeypatch):
     repo, _, pr = upstream
     output = tmp_path / "tasks"

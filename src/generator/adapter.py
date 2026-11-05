@@ -183,10 +183,12 @@ def upstream_pr_diff(pr: dict) -> bytes:
 
 
 def _patch_content(patch: bytes) -> list[bytes]:
-    # Rebase changes blob hashes and line numbers, but every source/context
-    # line (including Nim's significant indentation) must still match.
+    # Rebase changes blob hashes, line numbers, and untouched context. Every
+    # addition/deletion (including Nim's significant indentation) must match.
     return [
-        line for line in patch.splitlines() if not line.startswith((b"index ", b"@@ "))
+        line
+        for line in patch.splitlines()
+        if not line.startswith((b"index ", b"@@ ", b" "))
     ]
 
 
