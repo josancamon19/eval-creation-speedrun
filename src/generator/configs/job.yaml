@@ -9,7 +9,8 @@ environment:
   type: daytona
   delete: true
   kwargs:
-    auto_snapshot: true
+    # Declarative images retain Daytona's 24-hour cache without snapshot quotas.
+    auto_snapshot: false
 
 agents:
   - name: mini-swe-agent
