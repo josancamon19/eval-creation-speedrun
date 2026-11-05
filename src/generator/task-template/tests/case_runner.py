@@ -200,6 +200,7 @@ _OPTIONS = {
     "gc": _MEMORY_MANAGERS,
     "strings": {"default", "sso"},
     "threads": {"on", "off"},
+    "sinkinference": {"on", "off"},
     "exceptions": {"setjmp", "goto", "quirky"},
     "experimental": _EXPERIMENTAL,
 }

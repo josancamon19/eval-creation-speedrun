@@ -130,7 +130,15 @@ def test_compilation_explicitly_targets_linux_amd64_c(binary_fixture):
     assert result["compile_command"][1] == "c"
 
 
-@pytest.mark.parametrize("option", ["--newruntime", "--experimental:templateOpenSym"])
+@pytest.mark.parametrize(
+    "option",
+    [
+        "--newruntime",
+        "--experimental:templateOpenSym",
+        "--sinkInference:on",
+        "--sinkInference:off",
+    ],
+)
 def test_semantic_option_reaches_the_compiler_unchanged(binary_fixture, option):
     execute, _, _ = binary_fixture
     result = execute(case={"options": [option]})

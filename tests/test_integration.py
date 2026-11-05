@@ -587,6 +587,54 @@ def test_sidecar_or_ancestor_config_is_rejected(repository, configuration):
     assert "config" in result["rejected"]["tests/public/tmain.nim"].lower()
 
 
+def test_single_static_config_preserves_public_options_before_matrix(repository):
+    path = "tests/public/tmain.nim"
+    repo, head = repository(
+        {
+            path: 'discard """\nmatrix: "--mm:orc; --mm:refc"\n"""\ndoAssert true\n',
+            "tests/public/nim.cfg": "# Project defaults\n--sinkInference:on\n--mm:arc # CLI may override this\n",
+        }
+    )
+    result = collect(repo, head, [path])
+    assert result["rejected"] == {}
+    assert [c["options"] for c in result["cases"]] == [
+        ["--sinkInference:on", "--mm:arc", "--mm:orc"],
+        ["--sinkInference:on", "--mm:arc", "--mm:refc"],
+    ]
+    assert result["fixtures"] == [path]
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        "@if windows:\n--threads:on\n@end\n",
+        "--path:../compiler\n",
+        "--assertions:off\n",
+        "--passC:-DFOO\n",
+        "--mm:arc; --mm:orc\n",
+        'switch("mm", "arc")\n',
+        "--sinkInference:on --threads:on\n",
+    ],
+)
+def test_dynamic_or_unsafe_config_is_not_translated(repository, config):
+    path = "tests/public/tmain.nim"
+    repo, head = repository({path: "doAssert true\n", "tests/public/nim.cfg": config})
+    result = collect(repo, head, [path])
+    assert result["cases"] == []
+
+
+def test_multiple_config_layers_remain_rejected(repository):
+    path = "tests/public/tmain.nim"
+    repo, head = repository(
+        {
+            path: "doAssert true\n",
+            "tests/nim.cfg": "--mm:arc\n",
+            "tests/public/nim.cfg": "--threads:on\n",
+        }
+    )
+    assert collect(repo, head, [path])["cases"] == []
+
+
 def test_reads_committed_blobs_and_rejects_missing_or_escaping_paths(repository):
     repo, head = repository({"tests/tgood.nim": "doAssert true\n"})
     (repo / "tests/tgood.nim").write_text("import compiler/ast\n")

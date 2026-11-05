@@ -150,6 +150,7 @@ _OPTIONS = {
     },
     "strings": {"default", "sso"},
     "threads": {"on", "off"},
+    "sinkinference": {"on", "off"},
     "exceptions": {"setjmp", "goto", "quirky"},
     "experimental": _EXPERIMENTAL,
 }
@@ -812,7 +813,7 @@ class _Repository:
         except UnicodeDecodeError as error:
             raise _Rejected(f"non-UTF-8 source: {path}") from error
 
-    def check_config(self, path: str) -> None:
+    def check_config(self, path: str) -> list[str]:
         source = PurePosixPath(path)
         candidates = {
             str(source.with_suffix(".cfg")),
@@ -828,8 +829,29 @@ class _Repository:
             "tests/config.nims"
         )  # Universal upstream config; runner explicitly skips it.
         conflicts = sorted(candidates & self.files.keys())
-        if conflicts:
+        if not conflicts:
+            return []
+        if len(conflicts) != 1 or not conflicts[0].endswith(".cfg"):
             raise _Rejected(f"unsupported compiler config: {conflicts[0]}")
+        # Translate one plain option file, preserving command-line precedence.
+        # NimScript, conditionals, includes, and layered configs remain unsupported.
+        options = []
+        try:
+            for line in self.source(conflicts[0]).splitlines():
+                words = shlex.split(line, comments=True)
+                if not words:
+                    continue
+                if len(words) != 1:
+                    raise _Rejected("expected one compiler option per line")
+                _validate_options(words)
+                options.extend(words)
+            if not options:
+                raise _Rejected("empty option file")
+        except ValueError as error:
+            raise _Rejected(
+                f"unsupported compiler config: {conflicts[0]}: {error}"
+            ) from error
+        return options
 
     def resolve(self, path: str, module: str) -> str | None:
         name = module.removesuffix(".nim")
@@ -860,7 +882,7 @@ class _Repository:
     def inspect(self, path: str, closure: set[str]) -> dict:
         if path in closure:
             return self.parsed[path][0]
-        self.check_config(path)
+        config_options = self.check_config(path)
         if path not in self.parsed:
             self.parsed[path] = _source(self.source(path))
         spec, tokens = self.parsed[path]
@@ -869,7 +891,12 @@ class _Repository:
             dependency = self.resolve(path, module)
             if dependency is not None:
                 self.inspect(dependency, closure)
-        return spec
+        return {
+            **spec,
+            "configurations": [
+                config_options + options for options in spec["configurations"]
+            ],
+        }
 
 
 def collect_cases(repo: Path, head: str, paths: list[str]) -> dict:
