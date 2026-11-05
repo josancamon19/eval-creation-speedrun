@@ -11,6 +11,7 @@ Usage: uv run checks/static.py [datasets/nim/TASK]
 No target checks every task in datasets/nim. Reports: .cache/checks/TASK/static.md.
 Canary, instruction suffix, PR-only changelog, task fields/taxonomy/README,
 task package name, and dedicated verifier Dockerfile checks are omitted.
+Architecture portability is disabled for the Daytona Linux/AMD64 target.
 Apt pin detection is scoped to install commands; other check bodies are unchanged.
 Source: harbor-framework/terminal-bench @ 73d6279f91eb773bd51af2e2572a6fa044342e7a.
 Imported code license: _shared.APACHE_LICENSE (Apache-2.0).
@@ -418,7 +419,8 @@ CHECKS = [
     ("Image digest pins", "check-image-digests.sh"),
     ("Dependency lockfiles", "check-lockfiles.sh"),
     ("Dockerfile sanity", "check-dockerfile-sanity.sh"),
-    ("Dockerfile platform", "check-dockerfile-platform.sh"),
+    # Disabled: this benchmark targets Daytona's Linux/AMD64 environment.
+    # ("Dockerfile platform", "check-dockerfile-platform.sh"),
     ("Absolute paths", "check-task-absolute-path.sh"),
     ("Test refs", "check-test-file-references.sh"),
     ("test.sh sanity", "check-test-sh-sanity.sh"),

@@ -33,6 +33,7 @@ def job(tmp_path, monkeypatch):
             json.dumps(
                 {
                     "id": str(uuid4()),
+                    "task_name": "task",
                     "config": {"task": {"path": str(task)}},
                 }
             )
@@ -161,3 +162,123 @@ def test_symlink_evidence_cannot_upload_unrelated_host_files(
     output = tmp_path / "reports"
     assert trial_analysis.main([str(job), "--output", str(output)]) == 2
     assert "symlink" in report_paths(job, output)["task__first"].read_text()
+
+
+def test_issue_is_available_in_staged_instruction_without_changing_original(
+    job, tmp_path, monkeypatch
+):
+    task = tmp_path / "task"
+    instruction = "Fix the issue (`/workspace/26058.md`) for `/workspace/Nim`.\n"
+    issue = (
+        "Expected output: both elements are updated.\n```nim\ntouchAll(items)\n```\n"
+    )
+    (task / "instruction.md").write_text(instruction)
+    (task / "environment").mkdir()
+    (task / "environment/26058.md").write_text(issue)
+    before_task, before_job = snapshot(task), snapshot(job)
+
+    async def analyze(path, **kwargs):
+        for trial in path.glob("*/result.json"):
+            staged = Path(json.loads(trial.read_text())["config"]["task"]["path"])
+            contents = (staged / "instruction.md").read_text()
+            assert contents.startswith(instruction)
+            assert "/app/task/environment/26058.md" in contents
+            assert contents.count(issue) == 1
+            assert (staged / "environment/26058.md").read_text() == issue
+        return AnalyzeReport(
+            results=[success("task__first"), success("task__second")]
+        ), kwargs["jobs_dir"]
+
+    monkeypatch.setattr(trial_analysis, "run_analyze", analyze)
+    assert trial_analysis.main([str(job), "--output", str(tmp_path / "reports")]) == 0
+    assert snapshot(task) == before_task
+    assert snapshot(job) == before_job
+
+
+@pytest.mark.parametrize("failure", ["missing", "empty", "traversal", "task"])
+def test_missing_required_issue_evidence_is_an_error_before_review(
+    job, tmp_path, monkeypatch, failure
+):
+    task = tmp_path / "task"
+    (task / "instruction.md").write_text("Fix `/workspace/26058.md`.\n")
+    if failure == "empty":
+        (task / "environment").mkdir()
+        (task / "environment/26058.md").write_text(" \n")
+    elif failure == "traversal":
+        (task / "instruction.md").write_text("Fix `/workspace/../secret.md`.\n")
+    elif failure == "task":
+        task.rename(tmp_path / "missing-task")
+
+    async def unexpected(*args, **kwargs):
+        pytest.fail("Incomplete issue evidence must not reach the reviewer")
+
+    monkeypatch.setattr(trial_analysis, "run_analyze", unexpected)
+    output = tmp_path / "reports"
+    decisions = tmp_path / "decisions.json"
+    assert (
+        trial_analysis.main(
+            [str(job), "--output", str(output), "--json-output", str(decisions)]
+        )
+        == 2
+    )
+    assert all(
+        result["error"] for result in json.loads(decisions.read_text())["results"]
+    )
+    assert "ERROR" in report_paths(job, output)["task__first"].read_text()
+
+
+def test_json_decisions_preserve_fairness_failure_even_for_successful_trial(
+    job, tmp_path, monkeypatch
+):
+    async def analyze(path, **kwargs):
+        first, second = success("task__first"), success("task__second")
+        first.checks["task_specification"].outcome = CheckOutcome.FAIL
+        first.checks[
+            "task_specification"
+        ].explanation = (
+            "The issue expects runtime output, but the test requires rejection."
+        )
+        second.checks[
+            "reward_hacking"
+        ].explanation = "No hacking found; compiler warnings were harmless."
+        return AnalyzeReport(results=[first, second]), kwargs["jobs_dir"]
+
+    monkeypatch.setattr(trial_analysis, "run_analyze", analyze)
+    decisions = tmp_path / "decisions.json"
+    assert (
+        trial_analysis.main(
+            [
+                str(job),
+                "--output",
+                str(tmp_path / "reports"),
+                "--json-output",
+                str(decisions),
+            ]
+        )
+        == 0
+    )
+    data = json.loads(decisions.read_text())
+    assert data["job_id"] == json.loads((job / "result.json").read_text())["id"]
+    first, second = data["results"]
+    assert first["trial_name"] == "task__first"
+    assert first["task_name"] == "task"
+    assert first["trial_id"] == trial_analysis.source_id(job / "task__first")
+    assert first["checks"]["task_specification"]["outcome"] == "fail"
+    assert second["checks"]["reward_hacking"]["outcome"] == "pass"
+
+
+def test_incomplete_model_decision_becomes_error_report(job, tmp_path, monkeypatch):
+    async def analyze(path, **kwargs):
+        result = success("task__first")
+        del result.checks["task_specification"]
+        return AnalyzeReport(results=[result, success("task__second")]), kwargs[
+            "jobs_dir"
+        ]
+
+    monkeypatch.setattr(trial_analysis, "run_analyze", analyze)
+    output = tmp_path / "reports"
+    assert trial_analysis.main([str(job), "--output", str(output)]) == 2
+    assert (
+        "every configured criterion"
+        in report_paths(job, output)["task__first"].read_text()
+    )
