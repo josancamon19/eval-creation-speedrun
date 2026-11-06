@@ -21,6 +21,16 @@ agents:
       skip_install: true
       cost_limit: "0"
       # do not add a config here
+  # - name: mini-swe-agent
+  #   model_name: openai/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16:peft:262144
+  #   base_url: https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1
+  #   model_api_key_name: TINKER_API_KEY
+  #   extra_allowed_hosts:
+  #     - tinker.thinkingmachines.dev
+  #   kwargs:
+  #     version: "2.4.6"
+  #     skip_install: true
+  #     cost_limit: "0"
 
 datasets:
   - path: datasets/nim

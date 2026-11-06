@@ -39,9 +39,16 @@ extra-paths = ["checks"]
 
 [tool.uv.sources]
 harbor = { git = "https://github.com/harbor-framework/harbor.git", rev = "b7cc86b617eb5a220c3d6041dbcca4fda8a6f5a8" }
+tinker-cookbook = { git = "https://github.com/thinking-machines-lab/tinker-cookbook.git", rev = "f79fdb2ba4cd967ef2807ba43097c52985f9f17f" }
 
 [project.scripts]
 generator = "generator:main"
+
+[project.optional-dependencies]
+training = [
+    "mlflow>=3.18.0",
+    "tinker-cookbook",
+]
 
 [build-system]
 requires = ["uv_build>=0.12.1,<0.13.0"]
