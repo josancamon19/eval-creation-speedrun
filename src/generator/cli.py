@@ -30,6 +30,11 @@ def main():
     run.add_argument(
         "--config", type=Path, default=Path("src/generator/configs/job.yaml")
     )
+    run.add_argument(
+        "--env-file",
+        type=Path,
+        help="Load credentials from this file, overriding inherited environment values",
+    )
     args = parser.parse_args()
     if args.command == "export":
         if args.limit < 1 or args.scan_limit < 1 or args.calibration_concurrency < 1:
@@ -76,7 +81,9 @@ def main():
                 f"Only {exported}/{args.limit} tasks qualified; increase --scan-limit or supply more metadata"
             )
     else:
-        load_dotenv(".env", override=False)
+        if args.env_file is not None and not args.env_file.is_file():
+            parser.error(f"Environment file not found: {args.env_file}")
+        load_dotenv(args.env_file or ".env", override=args.env_file is not None)
         if os.environ.get("FIREWORKS_API_KEY"):
             os.environ.setdefault(
                 "FIREWORKS_AI_API_KEY", os.environ["FIREWORKS_API_KEY"]

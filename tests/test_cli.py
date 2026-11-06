@@ -124,3 +124,53 @@ def test_run_leaves_job_name_to_harbor(monkeypatch, tmp_path):
         cli.main()
     assert result.value.code == 0
     assert "job_name" not in seen[0]
+
+
+def test_explicit_env_file_overrides_inherited_credentials(monkeypatch, tmp_path):
+    config = tmp_path / "job.yaml"
+    config.write_text("agents: []\n")
+    env_file = tmp_path / "credentials.env"
+    env_file.write_text("TINKER_API_KEY=new-local-key\n")
+    monkeypatch.setenv("TINKER_API_KEY", "old-inherited-key")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "generator",
+            "run",
+            "model",
+            "--config",
+            str(config),
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    def execute(command):
+        import os
+
+        assert os.environ["TINKER_API_KEY"] == "new-local-key"
+        assert "new-local-key" not in Path(command[-1]).read_text()
+        return 0
+
+    monkeypatch.setattr(cli.subprocess, "call", execute)
+    with pytest.raises(SystemExit) as result:
+        cli.main()
+    assert result.value.code == 0
+
+
+def test_missing_explicit_env_file_fails_before_launch(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["generator", "run", "model", "--env-file", str(tmp_path / "missing.env")],
+    )
+    monkeypatch.setattr(
+        cli.subprocess,
+        "call",
+        lambda _: pytest.fail("Missing credentials file reached Harbor"),
+    )
+    with pytest.raises(SystemExit) as result:
+        cli.main()
+    assert result.value.code == 2
