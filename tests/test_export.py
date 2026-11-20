@@ -13,7 +13,8 @@ from generator.filters.fail_to_pass import (
     HarborEvaluator,
     validation_evidence_path,
 )
-from generator.utils.task_data import task_spec
+from generator.filters.hardening import completion_marker
+from generator.utils.task_data import read_literal, task_spec
 
 
 @pytest.fixture(autouse=True)
@@ -584,7 +585,11 @@ def test_original_test_and_helper_bytes_survive_same_path_pr_changes(
     assert (
         fixture_root / "base/tests/stdlib/support/helper.nim"
     ).read_bytes() == helper
-    assert (fixture_root / "pr/tests/stdlib/told.nim").read_bytes() == changed
+    # A PR program gains only the completion marker its case expects.
+    marker = completion_marker("pr", "tests/stdlib/told.nim")
+    assert (fixture_root / "pr/tests/stdlib/told.nim").read_bytes() == (
+        changed + f'echo "{marker}"\n'.encode()
+    )
     assert (
         fixture_root / "pr/tests/stdlib/support/helper.nim"
     ).read_bytes() == b"const stable* = 2\n"
@@ -1156,3 +1161,87 @@ def test_textual_issues_are_combined_with_formal_issues_and_bound_to_cache(
     assert (
         changed["exported"][0] / "environment/43.md"
     ).read_text() == "A corrected reproduction."
+
+
+def reported_test(repo, pr, text, lib=None):
+    """Replace the PR test with one that declares the name the issue reports."""
+    (repo / "tests/stdlib/tnew.nim").write_text(text)
+    if lib:
+        (repo / "lib").mkdir(exist_ok=True)
+        (repo / lib).write_text("fixed library\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "--amend", "--no-edit", "-q")
+    pr["mergeCommit"]["oid"] = git(repo, "rev-parse", "HEAD")
+
+
+def test_export_scores_a_renamed_variant_and_allowlists_reference_lib_files(
+    upstream, tmp_path
+):
+    repo, _, pr = upstream
+    reported_test(
+        repo, pr, "proc old() = discard # old() crashed\nold()\n", "lib/pure.nim"
+    )
+    task = export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate_regression)
+    assert read_literal(task / "tests/verify.py", "LIB_FILES") == ["lib/pure.nim"]
+    cases = task_spec(task)["cases"]
+    assert [(c["path"], c["role"], c.get("variant_of")) for c in cases] == [
+        ("tests/stdlib/tnew.nim", "fail_to_pass", None),
+        ("tests/stdlib/tnew_renamed.nim", "fail_to_pass", "tests/stdlib/tnew.nim"),
+        ("tests/stdlib/told.nim", "pass_to_pass", None),
+    ]
+    fixtures = task / "tests/fixtures/pr/tests/stdlib"
+    original, variant = (
+        (fixtures / name).read_text() for name in ("tnew.nim", "tnew_renamed.nim")
+    )
+    assert original.startswith("proc old() = discard # old() crashed\nold()\n")
+    assert "old" not in variant and "crashed" not in variant
+    for case, text in zip(cases, (original, variant)):
+        assert case["output_mode"] == "contains"
+        assert text.endswith(f'echo "{case["expected_output"]}"\n')
+    assert cases[0]["expected_output"] != cases[1]["expected_output"]
+    # Base regressions are still the upstream bytes with their upstream contract.
+    assert cases[2]["expected_output"] is None
+    assert (task / "tests/fixtures/base/tests/stdlib/told.nim").read_text() == (
+        "import ./support/helper\ndoAssert stable == 1\n"
+    )
+
+
+def test_export_without_lib_changes_trusts_the_whole_library(upstream, tmp_path):
+    repo, _, pr = upstream
+    task = export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate_regression)
+    assert read_literal(task / "tests/verify.py", "LIB_FILES") == []
+    # The issue names nothing this test declares, so there is no variant.
+    assert [c["path"] for c in task_spec(task)["cases"] if c["suite"] == "pr"] == [
+        "tests/stdlib/tnew.nim"
+    ]
+    assert not list(task.rglob("*_renamed.nim"))
+
+
+def test_unqualified_renamed_variant_is_not_published(upstream, tmp_path):
+    repo, _, pr = upstream
+    reported_test(repo, pr, "proc old() = discard\nold()\n")
+
+    def evaluate(task, agent):
+        observed = evaluate_regression(task, agent)
+        for check in observed["checks"]:
+            if check["path"].endswith("_renamed.nim"):
+                check.update(
+                    status="compile_error",
+                    passed=False,
+                    compile_exit_code=1,
+                    run_exit_code=None,
+                )
+        if agent == "oracle":
+            observed["status"] = "failed"
+        return observed
+
+    task = export_task(repo, pr, tmp_path / "tasks", evaluator=evaluate)
+    assert [(c["path"], c["role"]) for c in task_spec(task)["cases"]] == [
+        ("tests/stdlib/tnew.nim", "fail_to_pass"),
+        ("tests/stdlib/told.nim", "pass_to_pass"),
+    ]
+    assert not list(task.rglob("*_renamed.nim"))
+    evidence = json.loads(validation_evidence_path(task).read_text())
+    assert list(evidence["rejected"].values()) == [
+        "reference implementation does not pass (compile_error)"
+    ]

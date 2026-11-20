@@ -542,3 +542,58 @@ def test_harbor_preserves_only_complete_intentional_null_reward_reports(
     assert len(requests) == 1
     assert requests[0]["n_attempts"] == 1
     assert requests[0]["retry"] == {"max_retries": 0}
+
+
+def variant_candidate(task, cases):
+    """Case 0 is a PR test, case 2 its renamed variant, case 3 another variant."""
+    cases[2].update(path="tests/t0_renamed.nim", variant_of="tests/t0.nim")
+    cases[3].update(path="tests/tother_renamed.nim", variant_of="tests/tother.nim")
+    (task / "tests/verify.py").write_text(f"CASES = {cases!r}\n")
+    return cases
+
+
+def test_renamed_variant_is_scored_only_beside_its_fail_to_pass_original(candidate):
+    task, cases = candidate
+    cases = variant_candidate(task, cases)
+    reports = {
+        "nop": report(cases, ["wrong_exit", "passed", "compile_error", "wrong_exit"]),
+        "oracle": report(cases, ["passed"] * 4),
+    }
+    result = validate_fail_to_pass(task, lambda path, agent: reports[agent])
+    assert [(c["id"], c["role"]) for c in result["cases"]] == [
+        ("0", "fail_to_pass"),
+        ("1", "pass_to_pass"),
+        ("2", "fail_to_pass"),
+    ]
+    assert result["cases"][2]["variant_of"] == "tests/t0.nim"
+    assert result["rejected"] == {
+        "3": "renamed variant of a test that is not fail-to-pass"
+    }
+
+
+def test_renamed_variant_never_becomes_a_regression_or_pass_to_pass(candidate):
+    task, cases = candidate
+    cases = variant_candidate(task, cases)
+    reports = {
+        # Variant 2 passes without the fix; the reference then fails variant 3.
+        "nop": report(cases, ["wrong_exit", "passed", "passed", "passed"]),
+        "oracle": report(cases, ["passed", "passed", "passed", "compile_error"]),
+    }
+    result = validate_fail_to_pass(task, lambda path, agent: reports[agent])
+    assert [c["id"] for c in result["cases"]] == ["0", "1"]
+    assert set(result["rejected"]) == {"2", "3"}
+    assert result["rejected"]["2"] == "renamed variant passes on the baseline"
+
+
+def test_broken_renamed_variant_does_not_disqualify_the_task(candidate):
+    task, cases = candidate
+    cases = variant_candidate(task, cases)
+    reports = {
+        "nop": report(
+            cases, ["wrong_exit", "passed", "compile_error", "compile_error"]
+        ),
+        "oracle": report(cases, ["passed", "passed", "compile_error", "passed"]),
+    }
+    result = validate_fail_to_pass(task, lambda path, agent: reports[agent])
+    assert [c["id"] for c in result["cases"]] == ["0", "1"]
+    assert result["counts"]["fail_to_pass"] == 1

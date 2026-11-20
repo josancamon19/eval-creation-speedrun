@@ -58,6 +58,8 @@ def write_ctrf(report, log, cases, *, started_ms, stopped_ms=None):
     if "smoke" in report:
         smoke = report["smoke"]
         add("independent-smoke", smoke if smoke.get("status") else None)
+    for check in report.get("judge", []):
+        add(check["id"], check, path=check.get("path"))
     observations = {
         check.get("id") or f"{check.get('kind', 'case')}:{check['path']}": check
         for check in report.get("checks", [])

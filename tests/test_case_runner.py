@@ -552,22 +552,64 @@ def load_verifier():
         sys.path.remove(str(directory))
 
 
-def test_source_artifacts_replace_only_compiler_and_library(tmp_path):
+def test_source_artifacts_replace_compiler_and_only_allowlisted_library(tmp_path):
     verifier = load_verifier()
     source, build = tmp_path / "submitted", tmp_path / "build"
     for root in (source, build):
-        for name in ("compiler", "lib", "config"):
+        for name in ("compiler", "lib/std", "config"):
             (root / name).mkdir(parents=True)
     (build / "compiler/deleted.nim").write_text("deleted by the agent\n")
     (source / "compiler/nim.nim").write_text("candidate compiler\n")
-    (source / "lib/new.nim").write_text("new library module\n")
     (source / "config/nim.cfg").write_text("untrusted configuration\n")
     (build / "config/nim.cfg").write_text("trusted configuration\n")
-    verifier.install_sources(source, build)
+    for name in ("std/assertions.nim", "std/fixed.nim", "std/removed.nim", "same.nim"):
+        (build / "lib" / name).write_text("baseline\n")
+    # The submission disables assertions, fixes one file, deletes two, adds two.
+    (source / "lib/std/assertions.nim").write_text("discard\n")
+    (source / "lib/std/fixed.nim").write_text("fixed\n")
+    (source / "lib/same.nim").write_text("baseline\n")
+    (source / "lib/std/added.nim").write_text("added\n")
+    (source / "lib/new.nim").write_text("new library module\n")
+    ignored = verifier.install_sources(
+        source,
+        build,
+        ["lib/std/fixed.nim", "lib/std/removed.nim", "lib/std/added.nim"],
+    )
     assert not (build / "compiler/deleted.nim").exists()
     assert (build / "compiler/nim.nim").read_text() == "candidate compiler\n"
-    assert (build / "lib/new.nim").read_text() == "new library module\n"
     assert (build / "config/nim.cfg").read_text() == "trusted configuration\n"
+    assert (build / "lib/std/assertions.nim").read_text() == "baseline\n"
+    assert (build / "lib/std/fixed.nim").read_text() == "fixed\n"
+    assert (build / "lib/std/added.nim").read_text() == "added\n"
+    assert not (build / "lib/std/removed.nim").exists()
+    assert not (build / "lib/new.nim").exists()
+    assert ignored == ["lib/new.nim", "lib/std/assertions.nim"]
+
+
+def test_library_is_entirely_trusted_without_an_allowlist(tmp_path):
+    verifier = load_verifier()
+    assert verifier.LIB_FILES == []
+    source, build = tmp_path / "submitted", tmp_path / "build"
+    for root in (source, build):
+        for name in ("compiler", "lib"):
+            (root / name).mkdir(parents=True)
+    (build / "lib/system.nim").write_text("baseline\n")
+    (source / "lib/system.nim").write_text("tampered\n")
+    assert verifier.install_sources(source, build) == ["lib/system.nim"]
+    assert (build / "lib/system.nim").read_text() == "baseline\n"
+
+
+@pytest.mark.parametrize(
+    "entry", ["compiler/nim.nim", "lib", "lib/../compiler/nim.nim", "/lib/system.nim"]
+)
+def test_library_allowlist_cannot_reach_outside_lib(tmp_path, entry):
+    verifier = load_verifier()
+    source, build = tmp_path / "submitted", tmp_path / "build"
+    for root in (source, build):
+        for name in ("compiler", "lib"):
+            (root / name).mkdir(parents=True)
+    with pytest.raises(ValueError, match="invalid library allowlist entry"):
+        verifier.install_sources(source, build, [entry])
 
 
 @pytest.mark.parametrize("link", ["compiler", "compiler/linked.nim"])
@@ -686,6 +728,53 @@ def test_smoke_gates_reward_even_when_all_scored_checks_pass(smoke, status, rewa
     verifier.score_report(report)
     assert report["status"] == status
     assert report["reward"] == reward
+
+
+@pytest.mark.parametrize(
+    "judge,status,reward",
+    [
+        ({"passed": False, "status": "wrong_exit"}, "failed", 0),
+        (
+            {"passed": False, "status": "infrastructure_error"},
+            "infrastructure_error",
+            None,
+        ),
+        ({"passed": True, "status": "passed"}, "passed", 1),
+    ],
+)
+def test_judge_programs_gate_reward_even_when_all_scored_checks_pass(
+    judge, status, reward
+):
+    verifier = load_verifier()
+    report = {
+        "build": 0,
+        "smoke": {"passed": True, "status": "passed"},
+        "judge": [{"id": "judge-assertion", **judge}],
+        "checks": [{"passed": True, "status": "passed"}],
+    }
+    verifier.score_report(report)
+    assert report["status"] == status
+    assert report["reward"] == reward
+
+
+def test_failed_judge_program_scores_zero_without_case_results():
+    verifier = load_verifier()
+    report = {
+        "build": 0,
+        "smoke": {"passed": True, "status": "passed"},
+        "judge": [{"id": "judge-assertion", "passed": False, "status": "wrong_exit"}],
+        "checks": [],
+    }
+    verifier.score_report(report, [{"id": "new"}, {"id": "existing"}])
+    assert report["status"] == "failed"
+    assert report["reward"] == 0
+
+
+def test_judge_programs_expect_failures_to_stay_observable():
+    verifier = load_verifier()
+    exits = {name: status for name, (_, status) in verifier.JUDGE_PROGRAMS.items()}
+    assert exits == {"assertion": 1, "exception": 1, "exit-status": 7, "compiles": 0}
+    assert "doAssert" in verifier.JUDGE_PROGRAMS["assertion"][0]
 
 
 def test_infrastructure_failure_removes_stale_reward(tmp_path):

@@ -17,7 +17,7 @@ INCONCLUSIVE = {"timeout", "runtime_signal", "compiler_signal"}
 # Linux fault signals, independent of the host running the exporter. Resource
 # limits, SIGKILL and SIGTERM do not establish compiler defects.
 _COMPILER_FAULT_SIGNALS = {4, 6, 7, 8, 11}
-POLICY = "nim-blackbox-fail-to-pass-and-regressions-linux-amd64-c-v5"
+POLICY = "nim-blackbox-fail-to-pass-and-regressions-linux-amd64-c-v6"
 
 
 class EvaluationError(RuntimeError):
@@ -213,7 +213,10 @@ def validate_fail_to_pass(
     for case in cases:
         key = case["id"]
         before, after = indexed["nop"][key], indexed["oracle"][key]
-        if before["status"] == "passed":
+        if "variant_of" in case and before["status"] == "passed":
+            # A derived copy is scored only as evidence of the fix.
+            rejected[key] = "renamed variant passes on the baseline"
+        elif before["status"] == "passed":
             if after["status"] != "passed":
                 regressions[key] = (
                     f"{case['suite']}:{case['path']} passed on the baseline but "
@@ -241,6 +244,19 @@ def validate_fail_to_pass(
             "reference implementation causes existing-behavior regressions: "
             + json.dumps(regressions, sort_keys=True)
         )
+    originals = {
+        (case["suite"], case["path"])
+        for case in kept
+        if case["role"] == "fail_to_pass" and "variant_of" not in case
+    }
+    for case in kept:
+        if (
+            "variant_of" in case
+            and (case["suite"], case["variant_of"]) not in originals
+        ):
+            rejected[case["id"]] = "renamed variant of a test that is not fail-to-pass"
+    kept = [case for case in kept if case["id"] not in rejected]
+    crash_ids = [key for key in crash_ids if key not in rejected]
     if not any(case["role"] == "fail_to_pass" for case in kept):
         raise ValueError(
             f"no fail-to-pass integration cases: {json.dumps(rejected, sort_keys=True)}"
