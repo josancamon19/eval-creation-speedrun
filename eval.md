@@ -1,6 +1,8 @@
 ## Nim Bench Hard
 
-15 tasks from the [Nim compiler repository](https://github.com/nim-lang/Nim), published as `josancamon19/nim-hard@v1.2.0`. 3 attempts per task (45 per configuration; 180 retained attempts).
+15 tasks from the [Nim compiler repository](https://github.com/nim-lang/Nim), published as `josancamon19/nim-hard@v1.3.0`. 3 attempts per task (45 per configuration; 180 retained attempts).
+
+The attempts ran on `v1.2.0`. `v1.3.0` keeps the same prompts, environments and reference solutions and replaces the verifier with the hardened one described below. Every score is unchanged under `v1.3.0`: the 28 passing attempts, and the 8 failing attempts whose standard-library edits are no longer graded, were regraded from their archived source trees with the same result; the other 144 failing attempts can only fail again, because `v1.3.0` adds checks without removing any.
 
 ### Leaderboard
 
@@ -10,7 +12,7 @@ Pass@1 is the mean of the 15 task scores, where each task score is its number of
 
 ### Verifier
 
-The verifier restores trusted source and build dependencies at each task's starting revision, then replaces only `compiler/` and `lib/` with the submitted source trees. It rebuilds Nim with a trusted bootstrap and checks an independent compile-and-run smoke program. It then calls the rebuilt Nim binary on protected fixtures and checks compilation, exit status, and specified program output. It never imports compiler internals. The 15 tasks contain 474 cases: 17 fail-to-pass regression cases and 457 pass-to-pass preservation cases. All 17 regression cases compile and run; 17 preservation cases check successful compilation only. The verifier returns **1 only when the compiler builds, the smoke check passes, and every case passes**; ordinary solution failures return 0. Infrastructure failures are kept separate and retried. Case-level evidence is in each trial's `verifier/report.json` and `verifier/ctrf.json`.
+The verifier restores trusted source and build dependencies at each task's starting revision, then replaces `compiler/` with the submitted source tree. The standard library stays the task's original `lib/`, except for the files the reference fix changes (one file in one task), which are taken from the submission. It rebuilds Nim with a trusted bootstrap and checks an independent compile-and-run smoke program. Before scoring, it confirms with the rebuilt compiler that a failed assertion, an uncaught exception, a nonzero exit status and a compile-time check still behave correctly. It then calls the rebuilt Nim binary on protected fixtures and checks compilation, exit status, and specified program output. It never imports compiler internals. The 15 tasks contain 489 cases: 32 fail-to-pass regression cases and 457 pass-to-pass preservation cases. 15 of the regression cases, in 13 tasks, are copies of a regression program with its identifiers renamed, so recognising the reported example is not enough. Regression programs that declare no expected output must also print a completion line. All 32 regression cases compile and run; 17 preservation cases check successful compilation only. The verifier returns **1 only when the compiler builds, the smoke check passes, and every case passes**; ordinary solution failures return 0. Infrastructure failures are kept separate and retried. Case-level evidence is in each trial's `verifier/report.json` and `verifier/ctrf.json`.
 
 ### Task Sample
 
@@ -29,4 +31,4 @@ Across 12 trials, **4 passed**. Trajectories and verifier logs show:
 
 ![Pass@1 versus API-equivalent price, with task-level SEM and the empirical Pareto frontier](readme/eval-pareto.png)
 
-All retained trials, agent trajectories, submitted source artifacts, and verifier logs are available [here](https://hub.harborframework.com/jobs/a05e726f-555c-47fb-bf0d-7fdc7547bb0f).
+All retained trials, agent trajectories, submitted source artifacts, and the original `v1.2.0` verifier logs are available [here](https://hub.harborframework.com/jobs/a05e726f-555c-47fb-bf0d-7fdc7547bb0f).
