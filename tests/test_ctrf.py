@@ -74,3 +74,26 @@ def test_missing_submission_is_reported_as_infrastructure_error(tmp_path):
     assert data["summary"]["other"] == 1
     assert data["summary"]["passed"] == 0
     assert data["tests"][0]["message"] == "source capture missing"
+
+
+def test_reports_judge_programs_between_smoke_and_cases(tmp_path):
+    report = {
+        "status": "failed",
+        "submission": True,
+        "build": 0,
+        "smoke": {"passed": True, "status": "passed"},
+        "judge": [
+            {
+                "id": "judge-assertion",
+                "path": "tests/judge_assertion.nim",
+                "passed": False,
+                "status": "wrong_exit",
+            }
+        ],
+        "checks": [],
+    }
+    reporter().write_ctrf(report, tmp_path, [], started_ms=100, stopped_ms=200)
+    tests = json.loads((tmp_path / "ctrf.json").read_text())["results"]["tests"]
+    names = [test["name"] for test in tests]
+    assert names.index("independent-smoke") < names.index("judge-assertion")
+    assert tests[names.index("judge-assertion")]["status"] == "failed"

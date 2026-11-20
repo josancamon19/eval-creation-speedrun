@@ -3,7 +3,8 @@
 This is an allowlist for the supported test format, not a Nim interpreter or a
 proof of arbitrary program behavior. Unknown imports, options and directives
 fail closed. Dynamic fail-to-pass validation remains a separate requirement.
-All source is read from Git; the returned fixture names are copied unchanged.
+All source is read from Git; the returned fixture names are copied unchanged,
+before filters.hardening derives the PR-suite files that are actually graded.
 """
 
 import hashlib
@@ -394,13 +395,17 @@ class _Token:
     value: str
     kind: str
     line: int
+    offset: int = 0  # Start of value in the source text.
 
 
 _LIFETIME_HOOKS = {"=destroy", "=copy", "=sink", "=trace", "=dup", "=wasmoved"}
 
 
-def _tokens(source: str) -> list[_Token]:
-    """Lex enough Nim to identify imports, ignoring strings and nested comments."""
+def _tokens(source: str, comments: list[tuple[int, int]] | None = None) -> list[_Token]:
+    """Lex enough Nim to identify imports, ignoring strings and nested comments.
+
+    Comment spans are appended to comments when a list is supplied.
+    """
     result = []
     offset, line = 0, 1
     while offset < len(source):
@@ -410,6 +415,7 @@ def _tokens(source: str) -> list[_Token]:
             offset += 1
         elif source.startswith("#[", offset):
             depth = 1
+            start = offset
             offset += 2
             while depth and offset < len(source):
                 if source.startswith("#[", offset):
@@ -423,15 +429,20 @@ def _tokens(source: str) -> list[_Token]:
                     offset += 1
             if depth:
                 raise _Rejected("unterminated block comment")
+            if comments is not None:
+                comments.append((start, offset))
         elif char == "#":
             end = source.find("\n", offset)
-            offset = len(source) if end < 0 else end
+            end = len(source) if end < 0 else end
+            if comments is not None:
+                comments.append((offset, end))
+            offset = end
         elif source.startswith('"""', offset):
             end = source.find('"""', offset + 3)
             if end < 0:
                 raise _Rejected("unterminated multiline string")
             value = source[offset + 3 : end]
-            result.append(_Token(value, "triple", line))
+            result.append(_Token(value, "triple", line, offset + 3))
             line += value.count("\n")
             offset = end + 3
         elif char == '"':
@@ -455,14 +466,14 @@ def _tokens(source: str) -> list[_Token]:
                 offset += 1
             if offset >= len(source):
                 raise _Rejected("unterminated quoted string")
-            result.append(_Token(source[start:offset], "string", start_line))
+            result.append(_Token(source[start:offset], "string", start_line, start))
             offset += 1
         elif char == "'" and (
             match := re.match(
                 r"'(?:\\(?:x[0-9A-Fa-f]{2}|[0-9]{1,3}|.)|[^'\\\n])'", source[offset:]
             )
         ):
-            result.append(_Token(match[0], "char", line))
+            result.append(_Token(match[0], "char", line, offset))
             offset += len(match[0])
         elif char == "`":
             end = source.find("`", offset + 1)
@@ -474,13 +485,13 @@ def _tokens(source: str) -> list[_Token]:
                 and _normal(value) not in _LIFETIME_HOOKS
             ):
                 raise _Rejected("opaque quoted identifier")
-            result.append(_Token(value, "identifier", line))
+            result.append(_Token(value, "identifier", line, offset + 1))
             offset = end + 1
         elif match := re.match(r"[A-Za-z_][A-Za-z0-9_]*", source[offset:]):
-            result.append(_Token(match[0], "identifier", line))
+            result.append(_Token(match[0], "identifier", line, offset))
             offset += len(match[0])
         else:
-            result.append(_Token(char, "punctuation", line))
+            result.append(_Token(char, "punctuation", line, offset))
             offset += 1
     return result
 

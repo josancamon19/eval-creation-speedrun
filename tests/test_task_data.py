@@ -1,6 +1,6 @@
 import pytest
 
-from generator.utils.task_data import read_literal, write_cases
+from generator.utils.task_data import read_literal, write_cases, write_lib_files
 
 
 def test_cases_roundtrip_preserves_other_code_and_cannot_inject_code(tmp_path):
@@ -26,3 +26,13 @@ def test_invalid_task_literals_fail_closed(tmp_path, source):
     path.write_text(source)
     with pytest.raises(ValueError):
         read_literal(path, "CASES")
+
+
+def test_library_allowlist_is_written_sorted_beside_the_cases(tmp_path):
+    path = tmp_path / "tests/verify.py"
+    path.parent.mkdir()
+    path.write_text("CASES = [{'id': 'kept'}]\nLIB_FILES = []\nmain()\n")
+    write_lib_files(tmp_path, ["lib/system.nim", "lib/pure/os.nim", "lib/system.nim"])
+    assert read_literal(path, "LIB_FILES") == ["lib/pure/os.nim", "lib/system.nim"]
+    assert read_literal(path, "CASES") == [{"id": "kept"}]
+    assert path.read_text().endswith("\nmain()\n")

@@ -7,21 +7,60 @@ import shutil
 import tarfile
 import tempfile
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from case_runner import execute_command, require_environment, run_cases
 from ctrf import write_ctrf
 from scoring import safe_extract
 
 CASES = []
+# The only lib/ files accepted from a submission: those the reference fix changes.
+LIB_FILES = []
+# Test programs judge a compiler through assertions, exit statuses and uncaught
+# exceptions. Each program below must end with the listed exit status, so a
+# toolchain that turns those failures into successes is never scored.
+JUDGE_PROGRAMS = {
+    "assertion": ("var values = @[1, 2, 3]\ndoAssert(values.len == 4)\n", 1),
+    "exception": ('raise newException(ValueError, "judge")\n', 1),
+    "exit-status": ("quit(7)\n", 7),
+    "compiles": (
+        "doAssert(compiles(1 + 1))\n"
+        'doAssert(not compiles(1 + "a"))\n'
+        "doAssert(not compiles(undeclaredJudgeRoutine(1)))\n",
+        0,
+    ),
+}
 
 
 class InvalidSubmission(ValueError):
     """The submitted source is present but is not a regular source tree."""
 
 
-def install_sources(source, build):
-    """Use Harbor's source artifacts; preserve only verifier-owned tooling/config."""
+def changed_files(submitted, trusted):
+    """Relative paths that are added, removed or different in the submitted tree."""
+    names = {
+        path.relative_to(root).as_posix()
+        for root in (submitted, trusted)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    return sorted(
+        name
+        for name in names
+        if not (submitted / name).is_file()
+        or not (trusted / name).is_file()
+        or (submitted / name).read_bytes() != (trusted / name).read_bytes()
+    )
+
+
+def install_sources(source, build, lib_files=None):
+    """Use the submitted compiler, and the baseline library plus allowlisted files.
+
+    Test programs are compiled against lib/, where their assertions and output
+    routines live, so a submission cannot replace it wholesale. Returns the
+    submitted lib/ changes that were not installed.
+    """
+    lib_files = LIB_FILES if lib_files is None else lib_files
     for name in ("compiler", "lib"):
         submitted = Path(source) / name
         if submitted.is_symlink():
@@ -31,9 +70,28 @@ def install_sources(source, build):
         for path in submitted.rglob("*"):
             if path.is_symlink() or not (path.is_file() or path.is_dir()):
                 raise InvalidSubmission(f"non-regular source entry: {path}")
-        # Replace the whole tree so submitted deletions take effect too.
-        shutil.rmtree(build / name)
-        shutil.copytree(submitted, build / name)
+    # Replace the whole tree so submitted deletions take effect too.
+    shutil.rmtree(build / "compiler")
+    shutil.copytree(Path(source) / "compiler", build / "compiler")
+    allowed = set()
+    for name in lib_files:
+        parts = PurePosixPath(name).parts
+        if len(parts) < 2 or parts[0] != "lib" or ".." in parts:
+            raise ValueError(f"invalid library allowlist entry: {name}")
+        allowed.add("/".join(parts[1:]))
+    ignored = [
+        f"lib/{name}"
+        for name in changed_files(Path(source) / "lib", build / "lib")
+        if name not in allowed
+    ]
+    for name in sorted(allowed):
+        submitted, trusted = Path(source) / "lib" / name, build / "lib" / name
+        if submitted.is_file():
+            trusted.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(submitted, trusted)
+        else:
+            trusted.unlink(missing_ok=True)
+    return ignored
 
 
 def reject_symlinks(source):
@@ -82,10 +140,13 @@ def score_report(report, cases=None):
         )
         group["total"] += 1
         group["passed" if check.get("passed") is True else "failed"] += 1
+    judged = all(check.get("passed") is True for check in report.get("judge", []))
+    # Scored cases only run once the smoke and judge programs behave.
     if (
         cases is not None
         and report.get("build") == 0
         and report.get("smoke", {}).get("passed") is True
+        and judged
     ):
         expected = [case.get("id") for case in cases]
         observed = [check.get("id") for check in checks]
@@ -98,7 +159,11 @@ def score_report(report, cases=None):
                 status="infrastructure_error",
                 error="missing, duplicate, or unexpected case results",
             )
-    observations = [report.get("smoke", {}), *report.get("checks", [])]
+    observations = [
+        report.get("smoke", {}),
+        *report.get("judge", []),
+        *report.get("checks", []),
+    ]
     if report.get("status") == "infrastructure_error" or any(
         result.get("status") == "infrastructure_error" for result in observations
     ):
@@ -107,6 +172,7 @@ def score_report(report, cases=None):
     passed = (
         report.get("build") == 0
         and report.get("smoke", {}).get("passed") is True
+        and judged
         and bool(report.get("checks"))
         and all(case.get("passed") is True for case in report["checks"])
     )
@@ -138,6 +204,7 @@ def main():
         "build": None,
         "submission": None,
         "smoke": {"passed": False},
+        "judge": [],
         "checks": [],
         "reward": 0,
     }
@@ -155,8 +222,9 @@ def main():
             or any(not isinstance(case, dict) for case in cases)
         ):
             raise ValueError("verifier must contain a nonempty cases list")
-        # Restore trusted build inputs, then replace only compiler/library sources
-        # with Harbor's artifacts. Agent configuration and binaries never transfer.
+        # Restore trusted build inputs, then take the compiler sources and the
+        # allowlisted library files from Harbor's artifacts. Other library files,
+        # agent configuration and binaries never transfer.
         with tarfile.open("/opt/source.tar.gz") as archive:
             safe_extract(archive, build)
         with tarfile.open("/opt/dependencies.tar.gz") as archive:
@@ -164,7 +232,7 @@ def main():
         trusted_config = work / "trusted-config"
         copy_tree(build / "config", trusted_config)
         protect_tree(trusted_config)
-        install_sources(Path("/workspace/Nim"), build)
+        report["ignored_lib_changes"] = install_sources(Path("/workspace/Nim"), build)
         report["submission"] = True
         fixture_root = work / "fixtures"
         copy_tree(Path("/tests/fixtures"), fixture_root)
@@ -180,6 +248,19 @@ def main():
             "  doAssert sizeof(int) == 8\n"
             'let values = @[1, 2, 3]\ndoAssert values.len == 3\necho "nim-smoke-ok"\n'
         )
+        judge_cases = []
+        for name, (program, expected_exit) in JUDGE_PROGRAMS.items():
+            path = f"tests/judge_{name.replace('-', '_')}.nim"
+            (smoke_root / path).write_text(program)
+            judge_cases.append(
+                {
+                    "id": f"judge-{name}",
+                    "path": path,
+                    "target": "c",
+                    "options": [],
+                    "expected_exit": expected_exit,
+                }
+            )
         protect_tree(smoke_root)
         verifier = pwd.getpwnam("verifier")
         for path in [build, *build.rglob("*")]:
@@ -239,6 +320,17 @@ def main():
                 work_dir=output,
             )[0]
             if report["smoke"]["passed"]:
+                report["judge"] = run_cases(
+                    runtime / "bin/nim",
+                    smoke_root,
+                    judge_cases,
+                    log / "judge",
+                    command_prefix=prefix,
+                    work_dir=output,
+                )
+            if report["smoke"]["passed"] and all(
+                check["passed"] for check in report["judge"]
+            ):
                 report["checks"] = run_cases(
                     runtime / "bin/nim",
                     fixture_root,

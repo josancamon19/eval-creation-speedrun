@@ -18,11 +18,12 @@ from generator.filters.fail_to_pass import (
     save_validation_evidence,
     validate_fail_to_pass,
 )
+from generator.filters.hardening import harden_pr_cases
 from generator.filters.integration import collect_cases
 from generator.filters.regressions import collect_regression_cases
 from generator.utils.export_cache import ExportCache
 from generator.utils.issue_links import resolve_issue_references
-from generator.utils.task_data import write_cases
+from generator.utils.task_data import task_spec, write_cases, write_lib_files
 
 TEMPLATE = Path(__file__).parent / "task-template"
 REPOSITORY_URL = "https://github.com/nim-lang/Nim.git"
@@ -345,10 +346,21 @@ def _publish_task(
         retained = collect_cases(
             repo,
             commit,
-            [case["path"] for case in evidence["cases"] if case["suite"] == suite],
+            [
+                case.get("variant_of", case["path"])
+                for case in evidence["cases"]
+                if case["suite"] == suite
+            ],
         )
         retained_fixtures.update(f"{suite}/{path}" for path in retained["fixtures"])
-    for path in set(selection["fixtures"]) - retained_fixtures:
+    # Derived variants exist only in the staged task, never in the repository.
+    kept = {f"{case['suite']}/{case['path']}" for case in evidence["cases"]}
+    derived = {
+        f"{case['suite']}/{case['path']}"
+        for case in task_spec(staged)["cases"]
+        if "variant_of" in case
+    }
+    for path in (set(selection["fixtures"]) - retained_fixtures) | (derived - kept):
         (staged / "tests/fixtures" / path).unlink()
     write_cases(staged, evidence["cases"])
     evidence["static_rejections"] = selection["rejected"]
@@ -608,7 +620,22 @@ def _stage_task(repo: Path, pr: dict, info: dict, selection: dict, task: Path) -
         dest = fixtures / name
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(git(repo, "show", f"{commit}:{source}"))
-    write_cases(task, selection["cases"])
+    # Base fixtures stay byte-identical; PR programs gain completion markers and
+    # variants that do not reuse the names in the issue reports.
+    cases, derived = harden_pr_cases(
+        selection["cases"],
+        {
+            name.split("/", 1)[1]: (fixtures / name).read_text()
+            for name in selection["fixtures"]
+            if name.startswith("pr/")
+        },
+        [issue_markdown(issue["body"]) for issue in issues],
+    )
+    for name, text in derived.items():
+        (fixtures / "pr" / name).write_text(text)
+    write_cases(task, cases)
+    # Tests are compiled against lib/, so only the reference's lib/ files transfer.
+    write_lib_files(task, [p for p in info["implementation"] if p.startswith("lib/")])
 
 
 def discover(limit: int = 200) -> list[dict]:

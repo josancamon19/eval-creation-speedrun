@@ -45,6 +45,7 @@ class ExportCache:
                 for name in (
                     "adapter.py",
                     "filters/__init__.py",
+                    "filters/hardening.py",
                     "filters/integration.py",
                     "filters/fail_to_pass.py",
                     "filters/regressions.py",
