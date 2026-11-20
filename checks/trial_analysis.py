@@ -36,8 +36,18 @@ from harbor.models.environment_type import EnvironmentType
 DEFAULT_MODEL = "anthropic/claude-sonnet-5-5"
 
 
-def load_criteria() -> list[dict[str, str]]:
-    return tomllib.loads(RUBRIC_TEXT)["criteria"]
+def load_criteria(cheat: bool = False) -> list[dict[str, str]]:
+    """Cheat trials add the criteria that only apply to adversarial runs."""
+    rubric = tomllib.loads(RUBRIC_TEXT)
+    return rubric["criteria"] + (rubric["cheat_criteria"] if cheat else [])
+
+
+def rubric_text(criteria: list[dict[str, str]]) -> str:
+    return "\n".join(
+        "[[criteria]]\n"
+        + "".join(f"{key} = {json.dumps(value)}\n" for key, value in criterion.items())
+        for criterion in criteria
+    )
 
 
 def source_id(directory: Path) -> str:
@@ -198,7 +208,11 @@ def stage_job(trials: list[Path], workspace: Path, secrets: list[str]) -> Path:
 
 
 def render_report(
-    job: Path, trial: Path, result: AnalyzeReportResult, model: str
+    job: Path,
+    trial: Path,
+    result: AnalyzeReportResult,
+    model: str,
+    criteria: list[dict[str, str]],
 ) -> str:
     lines = [
         f"# Trial analysis: {html.escape(trial.name)}",
@@ -212,7 +226,7 @@ def render_report(
         lines.extend(["## ERROR", "", html.escape(result.error), ""])
     else:
         lines.extend([html.escape(result.summary or ""), ""])
-        for criterion in load_criteria():
+        for criterion in criteria:
             check = result.checks[criterion["name"]]
             lines.extend(
                 [
@@ -235,9 +249,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--json-output", type=Path, help="Optional machine-readable decision report"
     )
+    parser.add_argument(
+        "--cheat",
+        action="store_true",
+        help="The job ran cheat trials: also assess verifier tampering exposure",
+    )
     args = parser.parse_args(argv)
     if args.model in {"sonnet-5.5", "sonnet-5-5", "claude-sonnet-5-5"}:
         args.model = DEFAULT_MODEL
+    criteria = load_criteria(args.cheat)
     try:
         if args.concurrency < 1:
             raise ValueError("--concurrency must be positive")
@@ -257,11 +277,11 @@ def main(argv: list[str] | None = None) -> int:
                 workspace = Path(tmp)
                 staged = stage_job(trials, workspace, secrets)
                 rubric_path = workspace / "rubric.toml"
-                rubric_path.write_text(RUBRIC_TEXT)
+                rubric_path.write_text(rubric_text(criteria))
                 prompt_path = workspace / "instruction.txt"
                 guidance = "\n\n".join(
                     f"{c['name']}: {c['description']}\n{c['guidance']}"
-                    for c in load_criteria()
+                    for c in criteria
                 )
                 prompt_path.write_text(ANALYSIS_INSTRUCTION + "\n\n" + guidance)
                 # No job_name: Harbor chooses its default timestamp. Its default
@@ -297,7 +317,7 @@ def main(argv: list[str] | None = None) -> int:
             trial_name=trial.name, error="Harbor returned no analysis for this trial"
         )
         if not result.error and set(result.checks) != {
-            criterion["name"] for criterion in load_criteria()
+            criterion["name"] for criterion in criteria
         }:
             result = result.model_copy(
                 update={"error": "Analysis did not return every configured criterion"}
@@ -305,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
         errors |= result.error is not None
         report_path = output / f"{source_id(trial)}.md"
         report_path.write_text(
-            redact(render_report(job, trial, result, args.model), secrets)
+            redact(render_report(job, trial, result, args.model, criteria), secrets)
         )
         print(f"Report: {report_path}", flush=True)
         source_path = trial / "result.json"
