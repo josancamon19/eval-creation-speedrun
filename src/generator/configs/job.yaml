@@ -1,5 +1,5 @@
 # One independent fresh Daytona sandbox per task and attempt.
-n_attempts: 1
+n_attempts: 3
 n_concurrent_trials: 16
 jobs_dir: jobs
 retry:
@@ -13,8 +13,15 @@ environment:
     auto_snapshot: false
 
 agents:
+  # - name: mini-swe-agent
+  #   model_name: fireworks_ai/accounts/fireworks/models/deepseek-v4p1-flash-1017
+  #   override_timeout_sec: 7200
+  #   kwargs:
+  #     version: "2.4.6"
+  #     skip_install: true
+  #     cost_limit: "0"
   - name: mini-swe-agent
-    model_name: fireworks_ai/accounts/fireworks/models/deepseek-v4p1-flash-1017
+    model_name: fireworks_ai/accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b
     override_timeout_sec: 7200
     kwargs:
       version: "2.4.6"
@@ -33,4 +40,5 @@ agents:
   #     cost_limit: "0"
 
 datasets:
-  - path: datasets/nim
+  - name: josancamon19/nim-hard
+    ref: v1.2.0
