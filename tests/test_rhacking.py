@@ -1,4 +1,4 @@
-from generator.filters.hardening import (
+from generator.filters.rhacking import (
     completion_marker,
     harden_pr_cases,
     renamed_variant,
