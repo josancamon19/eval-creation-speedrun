@@ -94,7 +94,7 @@ def test_only_markdown_persists_and_input_job_is_unchanged(job, tmp_path, monkey
         kwargs["jobs_dir"].mkdir()
         (kwargs["jobs_dir"] / "config.json").write_text("temporary job")
         first = success("task__first")
-        first.checks["near_miss"].outcome = CheckOutcome.FAIL
+        first.checks["difficulty_crux"].outcome = CheckOutcome.FAIL
         return AnalyzeReport(results=[first, success("task__second")]), kwargs[
             "jobs_dir"
         ]
@@ -105,7 +105,7 @@ def test_only_markdown_persists_and_input_job_is_unchanged(job, tmp_path, monkey
     paths = report_paths(job, output)
     assert set(output.rglob("*.md")) == set(paths.values())
     assert len(snapshot(output)) == 2
-    assert "near_miss: FAIL" in paths["task__first"].read_text()
+    assert "difficulty_crux: FAIL" in paths["task__first"].read_text()
     assert "working solution" in paths["task__first"].read_text()
     assert snapshot(job) == before
     assert all(not path.exists() for path in staged_paths)
