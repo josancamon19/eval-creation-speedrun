@@ -13,7 +13,7 @@ from generator.filters.fail_to_pass import (
     HarborEvaluator,
     validation_evidence_path,
 )
-from generator.filters.hardening import completion_marker
+from generator.filters.rhacking import completion_marker
 from generator.utils.task_data import read_literal, task_spec
 
 

@@ -18,9 +18,9 @@ from generator.filters.fail_to_pass import (
     save_validation_evidence,
     validate_fail_to_pass,
 )
-from generator.filters.hardening import harden_pr_cases
 from generator.filters.integration import collect_cases
 from generator.filters.regressions import collect_regression_cases
+from generator.filters.rhacking import harden_pr_cases
 from generator.utils.export_cache import ExportCache
 from generator.utils.issue_links import resolve_issue_references
 from generator.utils.task_data import task_spec, write_cases, write_lib_files

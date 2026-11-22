@@ -4,7 +4,7 @@ This is an allowlist for the supported test format, not a Nim interpreter or a
 proof of arbitrary program behavior. Unknown imports, options and directives
 fail closed. Dynamic fail-to-pass validation remains a separate requirement.
 All source is read from Git; the returned fixture names are copied unchanged,
-before filters.hardening derives the PR-suite files that are actually graded.
+before filters.rhacking derives the PR-suite files that are actually graded.
 """
 
 import hashlib
